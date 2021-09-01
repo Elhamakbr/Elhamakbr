@@ -1,0 +1,77 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+import statistics
+
+#values
+x=[29.32, 31.66, 22.08, 29.63, 25.75, 29.61, 25.7, 19.63, 28.91, 29.17, 19.63, 20.26, 19.95, 24.92, 19.22, 27.23, 25.85,30.24,28.67,37.56, 21.58, 26.48, 21.2, 27.96, 44.76, 49.8, 36.41, 31.14, 22.57, 15.53, 11, 30.4, 14.44, 18.45, 11.08, 37.97, 27.37, 23.26, 37.53, 27.69, 25.7, 35.1, 39.78, 20.44, 35.82, 37.88, 40.55, 29.5, 31.08, 46.39, 39.13, 31.13, 32.53, 24.35, 22.28, 19.88, 34.55, 30.21, 34.51, 27.09, 19.02, 32.09, 25.14, 29.32, 21.55, 42.64, 32.96, 30.8, 32.62, 22, 33.94, 47.28, 20.98, 16.78, 15, 36.35, 35.46, 25.57, 39.57, 41.82, 30.12, 30.51, 38.23, 46.42, 35.66, 26.07, 24.4, 49.31, 41.22, 39.89, 23.29, 32.64, 30.42, 29.84, 40.16, 26.06, 31.49, 29.43, 26.07, 17.73, 35.98, 44.15, 32.6, 24.25, 40.37, 38.06, 2.23, 28.59, 19.03, 29.45, 23.1, 21.01, 31.22, 25.72, 24.77, 40.13, 27.72, 31.52, 24.48, 34.77, 32.7, 29.67, 32.98, 23.98, 29.6, 28.66, 21.61, 45.89, 18.45, 20.36, 25.32, 17.53, 29.32, 25.63, 20.54, 26.72, 24.55, 21.36, 14.75, 33.43, 24.47, 31.07, 20.66, 22.7, 28.44, 32.79, 26.31, 40.46, 34.95, 28.11, 38.24, 29.05, 37.45, 28.29, 44.42, 34.55, 24.59, 25.7, 30.54, 34.87, 37.3, 31.14, 34.13, 25.49, 25.72, 33.85, 23.59, 30.16, 25.07, 31.65, 25.72, 28.29, 23.1, 20.42]
+
+y=[38.935, 33.037, 23.152, 52.213, 62.78, 32.705, 33.691, 38.17, 43.635, 35.582, 46.825, 42.764, 34.474, 26.794, 40.761, 36.756, 48.754, 24.918, 37.442, 37.668, 50.152, 39.307, 17.131, 41.934, 35.955, 51.98, 41.934, 41.934, 57.959, 30.835, 14.016, 25.112, 43.718, 30.239, 52.698, 31.303, 44.597, 38.021, 36.821, 30.239, 27.199, 21.636, 30.239, 21.636, 20.306, 23.361, 36.144, 28.033, 23.109, 29.228, 34.998, 50.272, 39.888, 33.438]
+
+z=[33.438, 13.397, 20.952, 12.556, 17.757, 14.016, 26.106, 32.106, 16.26, 17.412, 43.635, 17.412, 23.152, 12.556, 15.417, 16.034, 13.397, 17.412, 24.227, 12.556, 11.861, 25.92, 21.636, 22.994, 17.757, 18.818, 23.152, 25.352, 14.775, 11.338, 11.338, 20.778, 25.92, 27.597, 20.306, 14.358, 12.556, 17.757, 18.689, 19.7, 15.574, 17.757, 19.822, 13.397, 17.412, 7.787, 14.016, 24.377, 8.81, 7.787, 13.397, 18.689, 15.338, 8.387, 11.861, 12.556, 13.397, 12.556, 8.387, 11.861, 8.387]
+
+#statistical values
+meanx = statistics.mean(x)
+print(meanx)
+meany = statistics.mean(y)
+print(meany)
+meanz = statistics.mean(z)
+print(meanz)
+
+medianx = statistics.median(x)
+print(medianx)
+mediany = statistics.median(y)
+print(mediany)
+medianz = statistics.median(z)
+print(medianz)
+
+modez = statistics.mode(z)
+print(modez)
+modex = statistics.mode(x)
+print(modex)
+modey = statistics.mode(y)
+print(modey)
+
+STDx = statistics.stdev(x)
+print(STDx)
+STDy = statistics.stdev(y)
+print(STDy)
+STDz = statistics.stdev(z)
+print(STDz)
+
+varx = statistics.variance(x)
+print(varx)
+vary = statistics.variance(y)
+print(vary)
+varz = statistics.variance(z)
+print(varz)
+
+#Histogram plot
+
+
+#Normal dustribution plot 
+stdx=np.std(x)
+meanx=np.mean(x)
+domain=np.linspace(0,70)
+plt.plot(domain,norm.pdf(domain,meanx,stdx), label="Normal inlet", color="brown")
+plt.hist(x, bins = 30, label="Inlet bacteria", alpha=0.9, rwidth=0.85)
+
+stdy=np.std(y)
+meany=np.mean(y)
+domain=np.linspace(0,70)
+plt.plot(domain,norm.pdf(domain,meany,stdy), label="Normal big outlet", color="black")
+plt.hist(y, bins = 30, label="Outlet big bacteria", alpha=0.9, rwidth=0.85)
+
+
+stdz=np.std(z)
+meanz=np.mean(z)
+domain=np.linspace(0,70)
+plt.plot(domain,norm.pdf(domain,meanz,stdz), label="Normal small outlet", color="orange")
+plt.hist(z, bins = 30, label="Outlet small bacteria", alpha=0.9, rwidth=0.85, color="y")
+
+plt.xlabel('Size (µm)')
+plt.ylabel('Frequency')
+plt.title('Size distribution of inlet and outlets bacteria')
+plt.legend()
+
+plt.show()
