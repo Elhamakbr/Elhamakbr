@@ -1,0 +1,72 @@
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+from scipy import ndimage
+from skimage import io, color, measure
+
+#Step 1: 
+img2 = cv2.imread('C:/Users/el4003ak/jPEG/0.8-2-reversed-filtered 100X 20 times diluted0 3D2 75.jpg', 0)
+pixel_to_um=0.065 # one pixel is equal to 6.5/100
+
+# ro get ride of scale bar in the picture we should crop the image
+cropped_image=img2[:, 0:400]
+
+# step 2
+plt.hist(img2.flat, range=(0,255))
+rat, thresh = cv2.threshold(img2, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+
+#step 3 I don't think it is necessary for all of our image analysis since the becteria cells ae quit apart 
+kernel=np.ones((3,3), np.uint8)
+eroded=cv2.erode(thresh, kernel, iterations=1)
+dilated=cv2.dilate(eroded, kernel, iterations=1)
+
+
+
+cv2.imshow("Thresholded image", thresh)
+cv2.imshow("Eroded image", eroded)
+cv2.imshow("Dilated image", dilated)
+
+
+
+#step 4
+mask=dilated ==255 # We can use thresholded instead of dilated if we want
+#Labeling the cells
+s=[[1,1,1], [1,1,1], [1,1,1]] #the structure is kinda connceted the pixels and [1,1,1] is the structure that Imagej is using
+labeled_mask, num_labels= ndimage.label(mask, structure=s)
+#then the images are labelled with color
+imgcolor=color.label2rgb(labeled_mask, bg_label=0)
+cv2.imshow("Color-labeled", imgcolor)
+
+
+#step 5 
+cells=measure.regionprops(labeled_mask, img2)
+
+#Extract region properties
+for prop in cells:
+    print('Label:{} Area:{}'.format(prop.label, prop.area))
+    
+
+#Export the data to an excel CSV. file
+proplist=['Area', 
+         'Equivalent diameter',
+         'Orientation',
+         'Majoraxlength',
+         'Minoraxlength',
+         'MinIntensity',
+         'MaxIntensity',
+         'MeanIntensity']
+output_file=open('Cellsizemeasuremen.csv', 'w')
+output_file.write(","+",".join(proplist)+'\n') #first comma is to leave the first cell empty if we wanr to add some stuff later and the last n is to create a new line after it is done
+pixel_to_um=0.065 # one pixel is equal to 6.5/100
+for cells_props in cells:   #this loop is created to convert pixel size to um
+    output_file.write(str(cells_props['Label']))
+    for i, prop in enumerate(proplist):
+        if (prop== 'Area'):
+            to_print=cells_props[prop]*pixel_to_um**2 #Area is square that's why the measurement should be multiplied to square
+        elif(prop =='Orientation'):
+                to_print=cells_props[prop]*57.2958 # It is not really necessary but the multiply convert radian to degree
+        else:   #the other values don't need to be multiplied and can print as they are
+                    to_print=cells_props[prop]
+        output_file.write(','+ str(to_print))
+    output_file.write('\n')
+            
