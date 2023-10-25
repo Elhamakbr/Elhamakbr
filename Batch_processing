@@ -1,0 +1,137 @@
+#import relevant libraries
+from __future__ import division
+import numpy as np
+import glob
+import matplotlib.pyplot as plt
+import skimage.io
+import skimage.color
+import skimage.filters
+import cv2
+from scipy import ndimage
+from skimage import io, color, measure, exposure, data
+from skimage.measure import label, regionprops, regionprops_table
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+import scipy.ndimage 
+import cv2
+import glob
+import IPython.display as ipd 
+from tqdm.notebook import tqdm
+import subprocess
+import skimage.io 
+from skimage import filters
+from scipy.ndimage import gaussian_filter
+from skimage.filters import rank
+from skimage import data
+from skimage.filters import *
+import pickle
+
+#This is a function that take an image, labels it and give the output of the particles' properties from regionprops module.
+def pipline(images):
+    
+    img = skimage.io.imread(images)
+    img=cv2.resize(img, (0,0), fx=.5, fy=.5)
+    gray_img = skimage.color.rgb2gray(img)
+    
+    gray_img = skimage.util.img_as_float(gray_img)
+    
+    
+    fig, ax = plt.subplots()
+    
+    blurred_img = skimage.filters.gaussian(gray_img, sigma=1.5)
+   
+    
+    histogram, bin_edges = np.histogram(blurred_img, bins=256, range=(0, 1))
+    
+    plt.plot(bin_edges[0:-1], histogram)
+    plt.title("Grayscale Histogram")
+    plt.xlabel("grayscale value")
+    plt.ylabel("pixels")
+    plt.xlim(0, 1.0)
+   
+   # first run the function and get the intensity histogram of masked images and based on that find the right value for t. 
+    t = 0.64
+    
+    binary_mask = t < blurred_img
+    fig, ax = plt.subplots()
+    #plt.imshow(binary_mask, cmap='gray')
+    #plt.show()
+    s=[[1,1,1], [1,1,1], [1,1,1]]
+    labeled_mask, num_labels= ndimage.label(binary_mask, structure=s)
+    #then the images are labelled with color
+    imgcolor=color.label2rgb(labeled_mask, bg_label=0)
+    
+    
+    
+   # plt.imshow(imgcolor)
+    
+    
+    import pandas as pd
+    props = measure.regionprops(labeled_mask)
+    props = regionprops_table(labeled_mask, properties=('area',
+                                                     'eccentricity',
+                                                     'major_axis_length',
+                                                     'minor_axis_length'))
+    
+    pd.DataFrame(props)
+
+    return plt.imshow(imgcolor), props
+
+
+#This is a function that take all the images from a directory and has the image processing function inside it. So, it can do batch processing of all images in that directory.
+#To run this function, the image processing function should be runned first. 
+
+def process_images(input_dir):
+    """
+    Process all images in a directory using image tiling.
+
+    Args:
+        input_dir (str): Path to the directory containing the images.
+
+    Returns:
+        all_imgcolor: List of processed images.
+        all_props: List of region properties for each processed image.
+    """
+    filelist = glob.glob(input_dir + '/*.jpg')   #change .jpg to .tif or .png if your files' format is not in jpg.
+    
+
+    all_props = []
+    all_imgcolor = []
+    success_counter = 0
+    
+    for filename in filelist:
+        # Exception handling so the program can move on if one image fails for some reason.
+        try:
+           imgc, prop = pipline(filename)
+           all_props.append(prop)
+           all_imgcolor.append(imgc)
+           success_counter += 1
+            
+            # Update the success counter       
+        except Exception:
+            from warnings import warn
+            warn("There was an exception in " + filename + "!!!")
+     
+    # How many images were successfully analyzed?
+    print ("Successfully analyzed", success_counter, "of", len(filelist), "images")
+    
+    return all_imgcolor, all_props
+
+process_images(input_dir=input_dirr)
+
+all_imgcolor, all_prop = process_images(input_dir=input_dirr)
+
+pd.DataFrame(all_prop[2])
+
+#The next lines of codes are making the output of the batch processor into a Pandas dataframe and concatenate the data of all images into one single dataframe.
+all_props_1=pd.DataFrame({'area', 'eccentricity', 'major_axis_length', 'minor_axis_length'})
+  
+
+for i in all_prop[0:]:
+    pd_i=pd.DataFrame(i)
+    all_props_1=pd.concat([pd_i, all_props_1], axis=0, ignore_index=True)    
+    print(all_props_1)
+
+print(all_props_1)
