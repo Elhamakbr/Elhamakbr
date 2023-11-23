@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Nov 23 16:28:27 2023
-
-@author: el4003ak
-"""
 
 import cv2
 import skimage
@@ -64,7 +58,7 @@ def pipline_2(images):
     binary_mask = binary_mask.astype(np.uint8)
     
     fig, ax = plt.subplots()
-
+#Can be decommented just in case
     kernel = np.ones((3, 3), np.uint8)
     eroded = cv2.erode(binary_mask, kernel, iterations=4)
     dilated = cv2.dilate(eroded, kernel, iterations=4)
@@ -88,16 +82,3 @@ imgcolor, props_table = pipline_2(images=r'H:\My Documents\Generated_image\rando
 
 plt.show()
 print(pd.DataFrame(props_table))
-
-
-# Condition for values larger than 3.5
-condition = pd.DataFrame(props_table)['major_axis_length'] > 1
-
-# Plotting the histogram for displaced beads
-pd.DataFrame(props_table)['major_axis_length'][condition]
-
-plt.hist(pd.DataFrame(props_table)['major_axis_length'][condition], bins=20, edgecolor='black')
-plt.title('Histogram of circularity')
-plt.xlabel('Major_axis_length')
-plt.ylabel('Frequency')
-plt.show()
