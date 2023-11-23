@@ -1,0 +1,62 @@
+
+import skimage
+import cv2
+import matplotlib.pyplot as plt
+from skimage import color, filters, measure, morphology, segmentation
+from skimage import util
+from skimage.measure import regionprops, regionprops_table
+from scipy import ndimage
+import numpy as np
+import pandas as pd
+
+def pipline_3(images, max_value):
+    img = skimage.io.imread(images)
+    img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+    
+    # Convert to grayscale using skimage
+    gray_img = skimage.color.rgb2gray(img)
+    gray_img = skimage.util.img_as_float(gray_img)
+
+    # Use adaptive thresholding on the grayscale image
+    binary_mask = cv2.adaptiveThreshold(
+        (gray_img * 255).astype(np.uint8),  # Convert to uint8
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 7, 4
+    )
+    
+    fig, ax = plt.subplots()
+    plt.imshow(binary_mask, cmap='gray')
+    plt.title("Adaptive Thresholding")
+    plt.show()
+
+    # Apply morphological operations to enhance segmentation
+    kernel = np.ones((5, 5), np.uint8)
+    eroded = cv2.erode(binary_mask, kernel, iterations=3)
+    dilated = cv2.dilate(eroded, kernel, iterations=3)
+
+    # Distance transform to find peaks for watershed
+    distance_transform = ndimage.distance_transform_edt(binary_mask)
+
+    # Find local maxima
+    local_maxima = (ndimage.maximum_filter(distance_transform, size=max_value) == distance_transform) & (distance_transform > 0)
+
+    # Mark the seeds for watershed
+    markers, num_labels = ndimage.label(local_maxima)
+
+    # Apply watershed segmentation
+    segmented = segmentation.watershed(-distance_transform, markers, mask=binary_mask)
+
+    # Visualize the result
+    imgcolor = color.label2rgb(segmented, bg_label=0)
+    plt.imshow(imgcolor)
+    plt.show()
+
+    props = measure.regionprops(segmented)
+    props_table = regionprops_table(segmented, properties=('area', 'eccentricity', 'major_axis_length', 'minor_axis_length'))
+    
+    return imgcolor, props_table
+
+imgcolor, props_table = pipline_3(images=r'H:\My Documents\Generated_image\random_image_4.tiff', max_value=92)
+
+plt.show()
+print(pd.DataFrame(props_table))
