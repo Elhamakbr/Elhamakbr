@@ -1,0 +1,103 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Nov 23 16:28:27 2023
+
+@author: el4003ak
+"""
+
+import cv2
+import skimage
+import skimage.io
+import skimage.color
+import skimage.filters
+import skimage.util
+import matplotlib.pyplot as plt
+from skimage import measure, ndimage, color
+from skimage.future import graph
+from skimage.measure import regionprops, regionprops_table
+import numpy as np
+import pandas as pd
+
+import skimage
+import cv2
+import matplotlib.pyplot as plt
+from skimage import color, filters, measure
+from skimage import util
+from skimage.color import label2rgb
+from skimage.measure import regionprops, regionprops_table
+import numpy as np
+import pandas as pd
+
+from skimage.segmentation import label2rgb  # Corrected import
+
+import skimage
+import cv2
+import matplotlib.pyplot as plt
+from skimage import color, filters, measure
+from skimage import util
+from skimage.segmentation import label2rgb
+from skimage.measure import regionprops, regionprops_table
+import numpy as np
+import pandas as pd
+
+def pipline_2(images):
+    img = skimage.io.imread(images)
+    img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+    
+    # Convert to grayscale using skimage
+    gray_img = skimage.color.rgb2gray(img)
+    gray_img = skimage.util.img_as_float(gray_img)
+
+    # Use adaptive thresholding on the grayscale image
+    binary_mask = cv2.adaptiveThreshold(
+        (gray_img * 255).astype(np.uint8),  # Convert to uint8
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 7, 4
+    )
+    
+    fig, ax = plt.subplots()
+    plt.imshow(binary_mask, cmap='gray')
+    plt.title("Adaptive Thresholding")
+    plt.show()
+    """
+    # Convert binary_mask to the correct data type
+    binary_mask = binary_mask.astype(np.uint8)
+    
+    fig, ax = plt.subplots()
+
+    kernel = np.ones((3, 3), np.uint8)
+    eroded = cv2.erode(binary_mask, kernel, iterations=4)
+    dilated = cv2.dilate(eroded, kernel, iterations=4)
+    
+    # Convert labeled_mask to integer type
+    labeled_mask = dilated.astype(int) """
+    s=[[1,1,1], [1,1,1], [1,1,1]]
+    labeled_mask, num_labels= ndimage.label(binary_mask, structure=s)
+    #then the images are labelled with color
+    imgcolor=color.label2rgb(labeled_mask, bg_label=0)
+    plt.imshow(imgcolor)
+    plt.show()
+    
+    
+    props = measure.regionprops(labeled_mask)
+    props_table = regionprops_table(labeled_mask, properties=('area', 'eccentricity', 'major_axis_length', 'minor_axis_length'))
+    
+    return imgcolor, props_table
+
+imgcolor, props_table = pipline_2(images=r'H:\My Documents\Generated_image\random_image_4.tiff')
+
+plt.show()
+print(pd.DataFrame(props_table))
+
+
+# Condition for values larger than 3.5
+condition = pd.DataFrame(props_table)['major_axis_length'] > 1
+
+# Plotting the histogram for displaced beads
+pd.DataFrame(props_table)['major_axis_length'][condition]
+
+plt.hist(pd.DataFrame(props_table)['major_axis_length'][condition], bins=20, edgecolor='black')
+plt.title('Histogram of circularity')
+plt.xlabel('Major_axis_length')
+plt.ylabel('Frequency')
+plt.show()
