@@ -1,62 +1,75 @@
-def pipline_4(images, thresh):
-    img = skimage.io.imread(images)
+def pipline_adaptive_manual(images, thresh):
+    img = skimage.io.imread(images, as_gray=True)
     #img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
 
     # Convert to grayscale using skimage
     gray_img = skimage.color.rgb2gray(img)
     gray_img = skimage.util.img_as_float(gray_img)
     
-    blurred_img = skimage.filters.gaussian(gray_img, sigma=9)
-
-    # Use adaptive thresholding on the grayscale image
-    binary_mask = cv2.adaptiveThreshold(
-        (blurred_img * 255).astype(np.uint8),  # Convert to uint8
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 7, 4
-    )
+    blurred_img = skimage.filters.gaussian(gray_img, sigma=0)
     
-    # Additional processing (e.g., second thresholding) on adaptive thresholding result
-    t = thresh
-    binary_mask_additional = t < gray_img
     
     # Display the results
-    fig, ax = plt.subplots(1, 3, figsize=(18, 4))
-
-    # Display adaptive thresholding result
-    ax[0].imshow(binary_mask, cmap='gray')
-    ax[0].set_title("Adaptive Thresholding")
-
-    # Display additional processing result
-    ax[1].imshow(binary_mask_additional, cmap='gray')
-    ax[1].set_title("Additional Processing")
-
-    # Calculate the histogram
-    histogram, bin_edges = np.histogram(binary_mask, bins=256, range=(0, 1))
+    fig, ax = plt.subplots(1, 4, figsize=(10, 8))
+     # Calculate the histogram
+    histogram, bin_edges = np.histogram(blurred_img, bins=256, range=(0, 1))
 
     # Plot the histogram
-    ax[2].plot(bin_edges[0:-1], histogram)
-    ax[2].set_title("Grayscale Histogram")
-    ax[2].set_xlabel("Grayscale Value")
-    ax[2].set_ylabel("Pixels")
-    ax[2].set_xlim(0, 1.0)
+    ax[0].plot(bin_edges[0:-1], histogram)
+    ax[0].set_title("Grayscale Histogram")
+    ax[0].set_xlabel("Grayscale Value")
+    ax[0].set_ylabel("Pixels")
+    ax[0].set_xlim(-1, 1.0)
+    #ax[0].set_ylim(0, 50)
 
-    # Continue with the rest of your code (e.g., watershed segmentation)
+    # 1st thresholding, manual threshodling
+    t = thresh
+    binary_mask = t < blurred_img
+    # Display manual thresholding
+    ax[1].imshow(binary_mask, cmap='gray')
+    ax[1].set_title("Manual thresholding")
+    
+     # Use adaptive thresholding on the binary image for better segmentation
+    binary_mask_additional = cv2.adaptiveThreshold(
+        (binary_mask * 255).astype(np.uint8),  # Convert to uint8
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 5, 2
+    )
+    
+    # Display adaptive thresholding result
+    ax[2].imshow(binary_mask_additional, cmap='gray')
+    ax[2].set_title("Adaptive Thresholding")
+    
+    
+    # Convert binary masks to the required data type and scale
+    binary_mask_additional_float = binary_mask_additional.astype(float) / 255.0
+    binary_mask = binary_mask.astype(float)
+
     s = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
-    labeled_mask, num_labels = ndimage.label(binary_mask_additional, structure=s)
-    imgcolor = color.label2rgb(labeled_mask, bg_label=0)
+    labeled_mask_final, num_labels = ndimage.label(binary_mask_additional_float, structure=s)
+    imgcolor = color.label2rgb(labeled_mask_final, bg_label=0)
 
+     # Display adaptive thresholding result
+    ax[3].imshow(imgcolor, cmap='gray')
+    ax[3].set_title("Laberlled_color")
 
     
-    props = measure.regionprops(labeled_mask)
-    props_table = measure.regionprops_table(labeled_mask, properties=('area', 'eccentricity', 'major_axis_length', 'minor_axis_length'))
+    props = measure.regionprops(labeled_mask_final)
+    props_table = measure.regionprops_table(labeled_mask_final, properties=('area', 'eccentricity', 'major_axis_length', 'minor_axis_length'))
     
-    return imgcolor, props_table, histogram, bin_edges
+    # Display pixel values and data type information
+    print("Original Image - Pixel values: ", gray_img.min(), gray_img.max())
+    print("Adaptive Thresholding Result - Pixel values: ", binary_mask.min(), binary_mask.max(), "Data Type: ", binary_mask.dtype)
+    print("Binary_mask_additional_float - Pixel values: ", 
+          binary_mask_additional_float.min(), binary_mask_additional_float.max(), 
+          "Data Type: ", binary_mask_additional_float.dtype)
+    print("Additional Processing Result - Pixel values: ", 
+          binary_mask_additional.min(), binary_mask_additional.max(), 
+          "Data Type: ", binary_mask_additional.dtype)
+
+    return imgcolor, props_table, histogram
+
 
 # Example usage:
-
-imgcolor, props_table, histogram, bin_edges=pipline_4(images=input_dirr, thresh=0.99)
-
-# Show the colored image outside the function
-plt.imshow(imgcolor)
-plt.title("Colored Image")
-plt.show()
+image_path = r'Image_Path'
+result_img, props_table, histogram  = pipline_adaptive_manual(image_path, thresh=0.6)
