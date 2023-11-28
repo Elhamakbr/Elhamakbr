@@ -1,0 +1,60 @@
+def pipline_otsu(images):
+    img = skimage.io.imread(images, as_gray=True)
+
+    # Convert to grayscale using skimage
+    gray_img = skimage.color.rgb2gray(img)
+    gray_img = skimage.util.img_as_float(gray_img)
+
+    # Convert the grayscale image to color (3 channels)
+    #img_color = cv2.cvtColor((gray_img * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+    blurred_img = skimage.filters.gaussian(gray_img, sigma=0)
+
+    # Use OTSU thresholding
+    _, binary_mask = cv2.threshold((blurred_img * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Display the results
+    fig, ax = plt.subplots(1, 3, figsize=(10, 8))
+
+    # Calculate the histogram
+    histogram, bin_edges = np.histogram(blurred_img, bins=256, range=(0, 1))
+
+    # Plot the histogram
+    ax[0].plot(bin_edges[0:-1], histogram)
+    ax[0].set_title("Grayscale Histogram")
+    ax[0].set_xlabel("Grayscale Value")
+    ax[0].set_ylabel("Pixels")
+    ax[0].set_xlim(-1, 1.0)
+
+    # Display OTSU thresholding result
+    ax[1].imshow(binary_mask, cmap='gray')
+    ax[1].set_title("OTSU Thresholding")
+
+
+
+    # Convert binary masks to the required data type and scale
+   # binary_mask_float = binary_mask.astype(float) / 255.0
+    binary_mask = binary_mask.astype(float)
+
+    s = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    labeled_mask_final, num_labels = ndimage.label(binary_mask, structure=s)
+    imgcolor = color.label2rgb(labeled_mask_final, bg_label=0)
+    
+     # Display colored_image
+    ax[2].imshow(imgcolor, cmap='gray')
+    ax[2].set_title("Colored Image")
+
+
+    props = measure.regionprops(labeled_mask)
+    props_table = measure.regionprops_table(labeled_mask_final, properties=('area', 'eccentricity', 'major_axis_length', 'minor_axis_length'))
+
+    # Display pixel values and data type information
+    print("Original Image - Pixel values: ", gray_img.min(), gray_img.max())
+    print("OTSU Thresholding Result - Pixel values: ", binary_mask.min(), binary_mask.max(), "Data Type: ", binary_mask.dtype)
+   # print("Binary_mask_float - Pixel values: ", binary_mask_float.min(), binary_mask_float.max(), "Data Type: ", binary_mask_float.dtype)
+
+    return imgcolor, props_table, histogram
+
+# Example usage:
+image_path = r'H:\My Documents\Image_generation_test\num_noise_20\random_image_7.tiff'
+result_img, props_table, histogram = pipline_otsu(image_path)
