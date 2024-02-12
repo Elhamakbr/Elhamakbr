@@ -1,3 +1,38 @@
+from __future__ import print_function
+from skimage.feature import peak_local_max
+from skimage.segmentation import watershed
+from scipy import ndimage
+import argparse
+import imutils
+import cv2
+import argparse
+from __future__ import division
+import numpy as np
+import glob
+import matplotlib.pyplot as plt
+import skimage.io
+import skimage.color
+import skimage.filters
+from scipy import ndimage
+from skimage import io, color, measure, exposure, data
+from skimage.measure import label, regionprops, regionprops_table
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+import scipy.ndimage 
+import IPython.display as ipd 
+from tqdm.notebook import tqdm
+import subprocess
+import skimage.io 
+from skimage import filters
+from scipy.ndimage import gaussian_filter
+from skimage.filters import rank
+from skimage import data
+from skimage.filters import *
+import pickle
+
+
 def pipline_otsu(images):
     img = skimage.io.imread(images, as_gray=True)
 
@@ -16,26 +51,19 @@ def pipline_otsu(images):
     # Display the results
     fig, ax = plt.subplots(1, 3, figsize=(10, 8))
 
-    # Calculate the histogram
-    histogram, bin_edges = np.histogram(blurred_img, bins=256, range=(0, 1))
-
-    # Plot the histogram
-    ax[0].plot(bin_edges[0:-1], histogram)
-    ax[0].set_title("Grayscale Histogram")
-    ax[0].set_xlabel("Grayscale Value")
-    ax[0].set_ylabel("Pixels")
-    ax[0].set_xlim(-1, 1.0)
-
-    # Display OTSU thresholding result
+    # Display OTSU thresholding result and the input image
+    ax[0].imshow(img_color, cmap='gray')
+    ax[0].set_title("input image")
     ax[1].imshow(binary_mask, cmap='gray')
-    ax[1].set_title("OTSU Thresholding")
+    ax[1].set_title("OTSU Thresholded")
 
-
-
-    # Convert binary masks to the required data type and scale
+    # Convert binary masks to the required data type and scale if needed. You can skip it if the data type requirement is satisfied
    # binary_mask_float = binary_mask.astype(float) / 255.0
-    binary_mask = binary_mask.astype(float)
+    #binary_mask = binary_mask.astype(float)
+    # Invert the binary mask
+    #binary_mask = np.invert(binary_mask)
 
+    #color labelling
     s = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
     labeled_mask_final, num_labels = ndimage.label(binary_mask, structure=s)
     imgcolor = color.label2rgb(labeled_mask_final, bg_label=0)
@@ -45,16 +73,84 @@ def pipline_otsu(images):
     ax[2].set_title("Colored Image")
 
 
-    props = measure.regionprops(labeled_mask)
-    props_table = measure.regionprops_table(labeled_mask_final, properties=('area', 'eccentricity', 'major_axis_length', 'minor_axis_length'))
+    props = measure.regionprops(labeled_mask_final)
+    props = measure.regionprops_table(labeled_mask_final, properties=('area',
+                                                     'eccentricity',
+                                                     'major_axis_length',
+                                                     'minor_axis_length'))
 
     # Display pixel values and data type information
     print("Original Image - Pixel values: ", gray_img.min(), gray_img.max())
     print("OTSU Thresholding Result - Pixel values: ", binary_mask.min(), binary_mask.max(), "Data Type: ", binary_mask.dtype)
    # print("Binary_mask_float - Pixel values: ", binary_mask_float.min(), binary_mask_float.max(), "Data Type: ", binary_mask_float.dtype)
 
-    return imgcolor, props_table, histogram
+    return imgcolor, props
 
-# Example usage:
-image_path = r'H:\My Documents\Image_generation_test\num_noise_20\random_image_7.tiff'
-result_img, props_table, histogram = pipline_otsu(image_path)
+# Batch processing
+def process_images_otsu(input_dir):
+    """
+    Process all images in a directory using image tiling.
+
+    Args:
+        input_dir (str): Path to the directory containing the images.
+
+    Returns:
+        all_imgcolor: List of processed images.
+        all_props: List of region properties for each processed image.
+    """
+    filelist = glob.glob(input_dir + '/*.tiff') #change it to the right image format
+    
+
+    all_props = []
+    all_imgcolor = []
+    success_counter = 0
+    
+    for filename in filelist:
+        # Exception handling so the program can move on if one image fails for some reason.
+        try:
+           imgc, props = pipline_otsu(filename)
+           all_props.append(props)
+           all_imgcolor.append(imgc)
+           success_counter += 1
+            
+            # Update the success counter       
+        except Exception:
+            from warnings import warn
+            warn("There was an exception in " + filename + "!!!")
+     
+    # How many images were successfully analyzed?
+    print ("Successfully analyzed", success_counter, "of", len(filelist), "images")
+    
+    return all_imgcolor, all_props
+
+
+all_imgcolor, all_prop = process_images_otsu(input_dir=r'folder_path')
+
+all_properties = pd.concat([pd.DataFrame(props) for props in all_prop], ignore_index=True)
+
+
+# Replace zeros with NaN and drop rows containing NaN
+all_properties = all_properties.replace(0, pd.NA).dropna()
+
+# Calculating circularity
+all_properties['circularity'] = 4 * all_properties['area'] / \
+                             (all_properties['major_axis_length'] + 
+                              all_properties['minor_axis_length'])**2
+
+all_properties['circularity']=all_properties['circularity']*(4/np.pi)
+
+#change scale to um. Use the right pixel size
+all_properties['area']=all_properties['area']*pixel_size_um*pixel_size_um
+all_properties['major_axis_length']=all_properties['major_axis_length']*pixel_size_um
+all_properties['minor_axis_length']=all_properties['minor_axis_length']*pixel_size_um
+all_properties
+
+#data filtering if needed
+all_properties = all_properties.loc[all_properties['circularity'] >= 0.8]
+all_properties = all_properties.loc[all_properties['major_axis_length']>=4]
+all_properties = all_properties.loc[all_properties['major_axis_length']<=100]
+all_properties = all_properties.loc[all_properties['minor_axis_length']>=3]
+all_properties = all_properties.loc[all_properties['area'] <= 2500]
+
+#save pandas data into exel (.csv) file
+all_properties.to_csv('file_name.csv', index=False)
