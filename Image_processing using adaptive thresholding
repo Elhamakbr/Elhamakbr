@@ -10,33 +10,18 @@ from skimage import measure, ndimage, color
 from skimage.future import graph
 from skimage.measure import regionprops, regionprops_table
 import numpy as np
-import pandas as pd
-
-import skimage
-import cv2
-import matplotlib.pyplot as plt
 from skimage import color, filters, measure
 from skimage import util
 from skimage.color import label2rgb
 from skimage.measure import regionprops, regionprops_table
-import numpy as np
 import pandas as pd
-
 from skimage.segmentation import label2rgb  # Corrected import
 
-import skimage
-import cv2
-import matplotlib.pyplot as plt
-from skimage import color, filters, measure
-from skimage import util
-from skimage.segmentation import label2rgb
-from skimage.measure import regionprops, regionprops_table
-import numpy as np
-import pandas as pd
 
-def pipline_2(images):
+
+def pipline_adaptive_with_erosion_and_dilate(images):
     img = skimage.io.imread(images)
-    img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+    img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5) #skip it if the image size is not too large
     
     # Convert to grayscale using skimage
     gray_img = skimage.color.rgb2gray(img)
@@ -78,7 +63,5 @@ def pipline_2(images):
     
     return imgcolor, props_table
 
-imgcolor, props_table = pipline_2(images=r'H:\My Documents\Generated_image\random_image_4.tiff')
+imgcolor, props_table = pipline_adaptive_with_erosion_and_dilate(images=r'Image_path')
 
-plt.show()
-print(pd.DataFrame(props_table))
