@@ -187,49 +187,28 @@ plt.savefig('file_name.pdf')
 
 
 #Boxplot
-# Filter the dataframes
-filtered_inet = inlet[(inlet['major_axis_length'] > 0.8) & (inlet['major_axis_length'] < 75)]
-filtered_displaced = displaced[(displaced['major_axis_length'] > 0.8) & (displaced['major_axis_length'] < 75)]
-filtered_middle = middle[(middle['major_axis_length'] > 0.8) & (middle['major_axis_length'] < 75)]
-filtered_non_displaced = non_displaced[(non_displaced['major_axis_length'] > 0.8) & (non_displaced['major_axis_length'] < 75)]
-filtered_sum = outlet_sum[(outlet_sum['major_axis_length'] > 0.8) & (outlet_sum['major_axis_length'] < 75)]
+# Filter the dataframes. Skip it if you don't need it
+filtered_df = df_file[(inlet['major_axis_length'] > 0.8) & (inlet['major_axis_length'] < 75)]
+#And the rest of the dataframes...
+
 
 
 # Plotting
 fig, ax = plt.subplots(figsize=(14, 10))
 
-# Create boxplot for each dataframe
-#outlet_sum=pd.read_csv(r'D:\Elham\31012024\All_excels_together\outlet_sum.csv')
-inlet.boxplot(ax=ax, column=['major_axis_length'], positions=[1], widths=0.2, patch_artist=True, labels=['Sum of outlets'])
-displaced.boxplot(ax=ax, column=['major_axis_length'], positions=[2], widths=0.2, patch_artist=True, labels=['10 um'])
-middle.boxplot(ax=ax, column=['major_axis_length'], positions=[3], widths=0.2, patch_artist=True, labels=['isplaced'])
-non_displaced.boxplot(ax=ax, column=['major_axis_length'], positions=[4], widths=0.2, patch_artist=True, labels=['middle'])
-outlet_sum.boxplot(ax=ax, column=['major_axis_length'], positions=[5], widths=0.2, patch_artist=True, labels=['No-displaced'])
-
-
-
-
+# Create boxplot for each dataframe. Number of subplots can vary according to number of dataframe
+df_file.boxplot(ax=ax, column=['major_axis_length'], positions=[1], widths=0.2, patch_artist=True, labels=['label_1'])
+df_file_2.boxplot(ax=ax, column=['major_axis_length'], positions=[2], widths=0.2, patch_artist=True, labels=['label_2'])
+df_file_3.boxplot(ax=ax, column=['major_axis_length'], positions=[3], widths=0.2, patch_artist=True, labels=['label_3'])
+df_file_4.boxplot(ax=ax, column=['major_axis_length'], positions=[4], widths=0.2, patch_artist=True, labels=['label_4'])
+df_file_5.boxplot(ax=ax, column=['major_axis_length'], positions=[5], widths=0.2, patch_artist=True, labels=['label_5'])
 # Remove grid
 ax.grid(False)
-
 # Set labels and title
-#ax.set_xlabel('Columns', fontsize=30)
-#ax.set_ylabel('Major axis length (um)', fontsize=30)
+#ax.set_xlabel('x_label', fontsize=30)
+#ax.set_ylabel('y_label', fontsize=30)
 ax.tick_params(axis='both', labelsize=24)
-#ax.legend(box1["boxes"][0], box2["boxes"][0], box3["boxes"][0], box4["boxes"][0], ['Inlet', 'Displaced', 'Moderately displaced','Non-displaced'], fontsize=24)
-
-
+#ax.legend(box1["boxes"][0], box2["boxes"][0], box3["boxes"][0], box4["boxes"][0], box5["boxes"][0], ['label_1', 'label_2', 'label_3','label_4','label_5'], fontsize=24
 # Show plot
-plt.savefig('BoXplot_sum_circularity.pdf')
-
-
-fig,axs=plt.subplots(1,1,figsize=(30,18))
-
-plt.hist(bead_7_um['major_axis_length'], bins=40, edgecolor='black', color='blue')
-plt.xlabel('Major axis length', fontsize=30)
-plt.ylabel('Frequency', fontsize=30)
-#plt.xlim(0, 70)
-plt.tick_params(axis='both', labelsize=24)
-#plt.savefig('major_axis_length_hist_inlet_displaced_non_displaced_middle.pdf')
-plt.show()
+plt.savefig('file_name.pdf')
 
