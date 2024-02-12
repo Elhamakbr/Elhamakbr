@@ -1,15 +1,18 @@
-def pipline_adaptive_manual(images, thresh):
-    img = skimage.io.imread(images, as_gray=True)
-    #img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+Image_path=r'put file path here'
+
+#For some images maybe each of these thresholding methods could work well. But for fluorescent images with background noises, both are probably necessary.
+def pipline_adaptive_manual(image, thresh):
+    img = skimage.io.imread(image, as_gray=True)
+    #img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5) #This can be used if the image is large in size
 
     # Convert to grayscale using skimage
     gray_img = skimage.color.rgb2gray(img)
-    gray_img = skimage.util.img_as_float(gray_img)
+    gray_img = skimage.util.img_as_float(gray_img) #check the image type. It can be skipped, if the image type is already float.
     
-    blurred_img = skimage.filters.gaussian(gray_img, sigma=0)
+    blurred_img = skimage.filters.gaussian(gray_img, sigma=0) #sigma value should be adjusted depending on the image background noise. 
     
     
-    # Display the results
+    # Display the histogram of the pixel values
     fig, ax = plt.subplots(1, 4, figsize=(10, 8))
      # Calculate the histogram
     histogram, bin_edges = np.histogram(blurred_img, bins=256, range=(0, 1))
@@ -22,14 +25,14 @@ def pipline_adaptive_manual(images, thresh):
     ax[0].set_xlim(-1, 1.0)
     #ax[0].set_ylim(0, 50)
 
-    # 1st thresholding, manual threshodling
+    # 1st thresholding, manual threshodling. Thresh should be chosen carefully to remove the peak in histogram file
     t = thresh
     binary_mask = t < blurred_img
     # Display manual thresholding
     ax[1].imshow(binary_mask, cmap='gray')
     ax[1].set_title("Manual thresholding")
     
-     # Use adaptive thresholding on the binary image for better segmentation
+     # Use adaptive thresholding on the binary image for better segmentation #Local values, in this case 5, and 2 should be changed accoeding to the size of the objects that needed to be detected and level of noise. 
     binary_mask_additional = cv2.adaptiveThreshold(
         (binary_mask * 255).astype(np.uint8),  # Convert to uint8
         255,
@@ -45,11 +48,12 @@ def pipline_adaptive_manual(images, thresh):
     binary_mask_additional_float = binary_mask_additional.astype(float) / 255.0
     binary_mask = binary_mask.astype(float)
 
+    #color labelling
     s = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
     labeled_mask_final, num_labels = ndimage.label(binary_mask_additional_float, structure=s)
     imgcolor = color.label2rgb(labeled_mask_final, bg_label=0)
 
-     # Display adaptive thresholding result
+    # Display adaptive thresholding result
     ax[3].imshow(imgcolor, cmap='gray')
     ax[3].set_title("Laberlled_color")
 
@@ -70,6 +74,42 @@ def pipline_adaptive_manual(images, thresh):
     return imgcolor, props_table, histogram
 
 
-# Example usage:
-image_path = r'Image_Path'
-result_img, props_table, histogram  = pipline_adaptive_manual(image_path, thresh=0.6)
+#Batch processing
+def process_image_5(input_dir):
+    """
+    Process all images in a directory using image tiling.
+
+    Args:
+        input_dir (str): Path to the directory containing the images.
+
+    Returns:
+        all_imgcolor: List of processed images.
+        all_props: List of region properties for each processed image.
+        all_hist: list of histograms of images
+    """
+    filelist = glob.glob(input_dir + '/*.tif') # Change to proper file format if needed. 
+    
+
+    all_props = []
+    all_imgcolor = []
+    all_hist = []
+    success_counter = 0
+    
+    for filename in filelist:
+        # Exception handling so the program can move on if one image fails for some reason.
+        try:
+           imgcolor, props_table, histogram = pipline_adaptive_manual(filename)   #imgcolor, props_table, histogram
+           all_props.append(props_table)
+           all_imgcolor.append(imgcolor)
+           all_hist.append(histogram)
+           success_counter += 1
+            
+            # Update the success counter       
+        except Exception:
+            from warnings import warn
+            warn("There was an exception in " + filename + "!!!")
+     
+    # How many images were successfully analyzed?
+    print ("Successfully analyzed", success_counter, "of", len(filelist), "images")
+    
+    return  all_props, all_imgcolor, all_hist
