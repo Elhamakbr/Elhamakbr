@@ -75,7 +75,7 @@ def pipline_adaptive_manual(image, thresh):
 
 
 #Batch processing
-def process_image_5(input_dir):
+def batch_processing_adaptive_manual(input_dir):
     """
     Process all images in a directory using image tiling.
 
@@ -113,3 +113,35 @@ def process_image_5(input_dir):
     print ("Successfully analyzed", success_counter, "of", len(filelist), "images")
     
     return  all_props, all_imgcolor, all_hist
+
+#Post processing 
+all_props, all_imgcolor, all_hist =batch_processing_adaptive_manual(input_dir=r'folder_path')
+
+all_properties = pd.concat([pd.DataFrame(props) for props in all_props], ignore_index=True)
+
+
+# Replace zeros with NaN and drop rows containing NaN
+all_properties = all_properties.replace(0, pd.NA).dropna()
+
+# Calculating circularity
+all_properties['circularity'] = 4 * all_properties['area'] / \
+                             (all_properties['major_axis_length'] + 
+                              all_properties['minor_axis_length'])**2
+
+all_properties['circularity']=all_properties['circularity']*(4/np.pi)
+
+#Change the scale to micrometer knowing pixel size
+all_properties['area']=all_properties['area']*pixel_size_um*pixel_size_um
+all_properties['major_axis_length']=all_properties['major_axis_length']*pixel_size_um
+all_properties['minor_axis_length']=all_properties['minor_axis_length']*pixel_size_um
+all_properties
+
+#Data filtering if needed
+all_properties = all_properties.loc[all_properties['circularity'] >= 0.85]
+all_properties = all_properties.loc[all_properties['major_axis_length']>=3]
+all_properties = all_properties.loc[all_properties['major_axis_length']<=20]
+all_properties = all_properties.loc[all_properties['minor_axis_length']>=3]
+all_properties = all_properties.loc[all_properties['area'] <= 2500]
+
+#Save data into excel (.csv) format.
+all_properties.to_csv('file_name.csv', index=False)
