@@ -100,7 +100,7 @@ def batch_processing_watershed(input_dir):  #input_dir=the folder having targete
     for filename in filelist:
         # Exception handling so the program can move on if one image fails for some reason.
         try:
-           props_table= watershed_final(filename)   #imgcolor, props_table, histogram, labeled_mask,
+           props_table= watershed_function(filename)   #imgcolor, props_table, histogram, labeled_mask,
            all_props.append(props_table)
            success_counter += 1
             
