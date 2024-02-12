@@ -84,7 +84,7 @@ total_length = len(df_file)
 percentage_selected = (selected_length / total_length) * 100
 
 print(f"Percentage of selected rows: {percentage_selected:.2f}%")
-
+        
 #Getting the basic statistics out of data. Different properties can be analyzed
 mean = df_file['major_axis_length'].mean()
 median = df_file['major_axis_length'].median()
