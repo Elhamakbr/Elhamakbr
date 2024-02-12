@@ -1,1 +1,235 @@
 
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from __future__ import division
+import glob
+import matplotlib.pyplot as plt
+import skimage.io
+import skimage.color
+import skimage.filters
+import cv2
+from scipy import ndimage
+from skimage import io, color, measure, exposure, data
+from skimage.measure import label, regionprops, regionprops_table
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+import scipy.ndimage 
+import IPython.display as ipd 
+from tqdm.notebook import tqdm
+import subprocess
+from scipy.ndimage import gaussian_filter
+from skimage.filters import rank
+from skimage import data
+from skimage.filters import *
+import pickle
+from PIL import Image
+
+#concatenate excel files in case different measurement had been done and they need to merge
+folder_path = r'Path_of_the_folder_with_all_csv_files'
+
+dfs = []
+
+for filename in os.listdir(folder_path):
+    if filename.endswith(".csv"):  # You can change the file extension as needed
+        file_path = os.path.join(folder_path, filename)
+        df = pd.read_csv(file_path)
+        dfs.append(df)
+
+final_df = pd.concat(dfs, ignore_index=True)
+final_df
+
+#Save the concatenated data in csv format
+final_df.to_csv('file_name.csv', index=False)
+
+
+#Read file/s
+df_file= pd.read_csv(r'file_path')
+df_file
+
+#extra step to modify data. Skip it if don't need it. 
+# Define the columns and their respective thresholds
+columns_and_thresholds = {'major_axis_length': 0.8, 'area': 2.0}
+
+# Loop through the columns and replace values based on their thresholds
+for col, threshold in columns_and_thresholds.items():
+    filter_sonication[col] = filter_sonication[col].apply(lambda x: threshold if x < threshold else x)
+
+# Save the modified DataFrame as a CSV file
+filter_sonication.to_csv('file_name.csv', index=False)
+
+
+# get the purity of the sorted subpopulations by dividing the data into four regions of larger and smaller than critical size and larger and smaller than 0.5 in circularity. The same region that are shown in scatter plots
+
+#filtering can be based on different properties. Here is the example of major_axis_length and circularity which are from Pandas dataframe
+# Filter based on major_axis_length
+filtered_major = df_file[
+    #(df_file['major_axis_length'] > 0.8) &
+    (df_file['major_axis_length'] < 8.5)
+]
+
+# Filter based on eccentricity
+filtered_eccentricity = df_file[df_file['circularity'] < 0.5]
+# Filter based on area
+#filtered_area = df_file[df_file['area'] > 2]
+
+# Calculate the length of the selected DataFrame
+selected_length = len(filtered_major.index & filtered_eccentricity.index) #& filtered_area.index)
+
+# Calculate the total length of the original DataFrame
+total_length = len(df_file)
+
+# Calculate the percentage of selected rows
+percentage_selected = (selected_length / total_length) * 100
+
+print(f"Percentage of selected rows: {percentage_selected:.2f}%")
+
+#Getting the basic statistics out of data. Different properties can be analyzed
+mean = df_file['major_axis_length'].mean()
+median = df_file['major_axis_length'].median()
+mode = df_file['major_axis_length'].mode().values[0]
+std_dev = df_file['major_axis_length'].std()
+
+
+
+# Plotting the histogram. #different properties can be chosen to plot. Here is major_axis_length. Number of subplots depends of the number of data that are needed to compare.
+fig,axs=plt.subplots(1,1,figsize=(30,18))
+
+plt.hist(df_file['major_axis_length'], bins=40, edgecolor='black', color='yellow', density='True')
+#plt.hist(df_file_2['major_axis_length'], bins=10, edgecolor='black', color='red')
+#plt.hist(df_file_3['major_axis_length'], bins=10, edgecolor='black', color='green')
+#plt.hist(df_file_4['major_axis_length'], bins=40, edgecolor='black', color='Orange')
+#plt.title('Histogram of Major_axis_length')
+plt.xlabel('Major axis length', fontsize=30)
+plt.ylabel('Frequency', fontsize=30)
+plt.xlim(0, 70) #depends on the data size
+plt.tick_params(axis='both', labelsize=24)
+plt.savefig('file_name.pdf')
+
+
+#plotting histogram with the same bin size
+
+# Define bin edges based on the desired size of bins
+bin_edges = np.linspace(0, 75, 41)  # 40 bins with equal width from 0 to 75. These values can be adjusted depending on data range
+
+fig, axs = plt.subplots(5, 1, figsize=(30, 18))
+
+axs[0].hist(df_file['major_axis_length'], bins=bin_edges, edgecolor='black', color='green', density=True, label='Inlet')
+axs[1].hist(df_file_2['major_axis_length'], bins=bin_edges, edgecolor='black', color='red', density=True, label='Displaced')
+axs[2].hist(df_file_3['major_axis_length'], bins=bin_edges, edgecolor='black', color='orange', density=True, label='Moderately displaced')
+axs[3].hist(df_file_4['major_axis_length'], bins=bin_edges, edgecolor='black', color='blue', density=True, label='Non-displaced')
+axs[4].hist(df_file_5['major_axis_length'], bins=bin_edges, edgecolor='black', color='yellow', density=True, label='Sum of outlets')
+
+for ax in axs:
+    ax.set_xlabel('Major axis length', fontsize=30)
+    ax.set_ylabel('Frequency', fontsize=30)
+    ax.set_xlim(0, 75)
+    ax.legend(fontsize=30)
+    ax.tick_params(axis='both', labelsize=24)
+
+plt.tight_layout()
+#Save file in pdf or png format
+plt.savefig('file_name.pdf')
+plt.show()
+
+#Measuring total pixel value of images to calculate comcentration
+def measure_pixels(folder_path):
+   total_area = 0
+   for filename in os.listdir(folder_path):
+        if filename.endswith(".png") or filename.endswith(".tif") or filename.endswith(".jpeg"):
+            image_path = os.path.join(folder_path, filename)
+            img = Image.open(image_path)
+            width, height = img.size
+            total_area += width * height
+
+   return total_area
+
+# Example usage:
+folder_path = r"folder_path"  
+total_area = measure_pixels(folder_path)
+print(f"Sum of products of width and height of all images: {total_area*0.65*0.65/1000000}") #The final value would be in um2
+
+
+#Measuring concentration
+concentration_of_objects=len(df_file)/(total_area_in_um)  
+concentration_of_bacteria = df_file['area'].sum()/(area_of_one_bacteria)  
+
+
+# Plotting concentration_of_objects and concentration_of_bacteria nside by side in bar charts
+fig, ax = plt.subplots(figsize=(14, 10))
+
+# Set the width of the bars
+bar_width = 0.2
+
+# Set the positions of the bars on the x-axis
+r1 = np.arange(len(df.columns))
+r2 = [x + bar_width for x in r1]
+
+# Plot the bars
+ax.bar(r1, df_concentration_of_objects.iloc[0], color='b', width=bar_width, edgecolor='grey', label='Number of particles/um2')
+ax.bar(r2, df_concentration_of_bacteria.iloc[1], color='r', width=bar_width, edgecolor='grey', label='Number of bacteria/um2')
+
+# Add labels and title
+#ax.set_xlabel('Columns', fontsize=30)
+ax.set_ylabel('Number of bacteria/particles', fontsize=30)
+ax.set_xticks([r + bar_width/2 for r in r1])
+ax.set_xticklabels(df.columns)
+ax.legend(fontsize=24)
+ax.tick_params(axis='both', labelsize=24)
+ax.set_yscale('log')
+
+plt.xticks(rotation=0)
+plt.tight_layout()
+
+# Show plot
+plt.savefig('file_name.pdf')
+
+
+#Boxplot
+# Filter the dataframes
+filtered_inet = inlet[(inlet['major_axis_length'] > 0.8) & (inlet['major_axis_length'] < 75)]
+filtered_displaced = displaced[(displaced['major_axis_length'] > 0.8) & (displaced['major_axis_length'] < 75)]
+filtered_middle = middle[(middle['major_axis_length'] > 0.8) & (middle['major_axis_length'] < 75)]
+filtered_non_displaced = non_displaced[(non_displaced['major_axis_length'] > 0.8) & (non_displaced['major_axis_length'] < 75)]
+filtered_sum = outlet_sum[(outlet_sum['major_axis_length'] > 0.8) & (outlet_sum['major_axis_length'] < 75)]
+
+
+# Plotting
+fig, ax = plt.subplots(figsize=(14, 10))
+
+# Create boxplot for each dataframe
+#outlet_sum=pd.read_csv(r'D:\Elham\31012024\All_excels_together\outlet_sum.csv')
+inlet.boxplot(ax=ax, column=['major_axis_length'], positions=[1], widths=0.2, patch_artist=True, labels=['Sum of outlets'])
+displaced.boxplot(ax=ax, column=['major_axis_length'], positions=[2], widths=0.2, patch_artist=True, labels=['10 um'])
+middle.boxplot(ax=ax, column=['major_axis_length'], positions=[3], widths=0.2, patch_artist=True, labels=['isplaced'])
+non_displaced.boxplot(ax=ax, column=['major_axis_length'], positions=[4], widths=0.2, patch_artist=True, labels=['middle'])
+outlet_sum.boxplot(ax=ax, column=['major_axis_length'], positions=[5], widths=0.2, patch_artist=True, labels=['No-displaced'])
+
+
+
+
+# Remove grid
+ax.grid(False)
+
+# Set labels and title
+#ax.set_xlabel('Columns', fontsize=30)
+#ax.set_ylabel('Major axis length (um)', fontsize=30)
+ax.tick_params(axis='both', labelsize=24)
+#ax.legend(box1["boxes"][0], box2["boxes"][0], box3["boxes"][0], box4["boxes"][0], ['Inlet', 'Displaced', 'Moderately displaced','Non-displaced'], fontsize=24)
+
+
+# Show plot
+plt.savefig('BoXplot_sum_circularity.pdf')
+
+
+fig,axs=plt.subplots(1,1,figsize=(30,18))
+
+plt.hist(bead_7_um['major_axis_length'], bins=40, edgecolor='black', color='blue')
+plt.xlabel('Major axis length', fontsize=30)
+plt.ylabel('Frequency', fontsize=30)
+#plt.xlim(0, 70)
+plt.tick_params(axis='both', labelsize=24)
+#plt.savefig('major_axis_length_hist_inlet_displaced_non_displaced_middle.pdf')
+plt.show()
+
