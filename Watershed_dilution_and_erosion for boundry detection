@@ -56,7 +56,7 @@ def pipline_3(images, max_value):
     
     return imgcolor, props_table
 
-imgcolor, props_table = pipline_3(images=r'H:\My Documents\Generated_image\random_image_4.tiff', max_value=92)
+imgcolor, props_table = pipline_3(images=r'image_path', max_value=92) #chnage the values accordingly
 
 plt.show()
 print(pd.DataFrame(props_table))
