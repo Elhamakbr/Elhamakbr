@@ -236,7 +236,7 @@ plt.savefig('file_name.pdf')
 
 
 
-#Scatter plots function which also includes vurve fitting. comment curve fitting if don't need it
+#Scatter plots function which also includes vurve fitting. comment curve fitting if don't need it. The function has three inputs. One can increase or decrease it according to the sets of data frames.
 import matplotlib.colors as mcolors
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
