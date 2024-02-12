@@ -23,7 +23,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import scipy.ndimage 
-import cv2
 import glob
 import IPython.display as ipd 
 from tqdm.notebook import tqdm
@@ -36,7 +35,7 @@ from skimage import data
 from skimage.filters import *
 import pickle
 
-# Sample data
+# Sample data and show the probabillity of occurance 
 events = np.array(['Breaking and Merging', 'Deformation', 'Displacement', 'Rotation', 'Rotation and Deformation'])
 occurrences = np.array([4, 68, 16, 92, 35])
 
@@ -67,7 +66,7 @@ cbar = ax.figure.colorbar(im, ax=ax)
 cbar.set_label('Probability')
 
 # Show the plot
-plt.savefig('probability_colormap.pdf')
+plt.savefig('file_name.pdf')
 
 
 #Rotation Analysis
@@ -143,7 +142,7 @@ def elipse_drawing(image_path, output_path, x, y, w, h):
     # Output the coordinates of the center of mass for the rest of the objects
     print("Centers of Mass (Other Objects):", other_centers)
        
-    #fit the objectsto elipse:
+    #fit the objectst o elipse:
         
     # Create an empty image to draw ellipses
     ellipse_image = np.zeros_like(cropped_image, dtype=np.uint8)
@@ -184,9 +183,9 @@ def elipse_drawing(image_path, output_path, x, y, w, h):
     # Output the rotation angles
     return print("Rotation Angles (degrees):", rotation_angles)
     
-image_folder = r'C:\Users\el4003ak\Dropbox\PAPER_Bacteria_Clusters_MAY2023\Fast_camera_images\Displaced_mask_image_together\Mode_separation\Rotation/Z_outlet_100mbar_image_1_the_break_apart.png'
-output_folder=r'C:\Users\el4003ak\Dropbox\PAPER_Bacteria_Clusters_MAY2023\Fast_camera_images\Displaced_mask_image_together\Mode_separation\Rotation\Elipses_images'
-x_1, y_1, w_1, h_1 = 180, 38, 75, 220
+image_path = r'image_path'
+output_folder=r'folder_path'
+#x_1, y_1, w_1, h_1 = put the coordinates and size of cropping area 
 
 elipse_drawing(image_folder, output_folder, x_1, y_1, w_1, h_1)
 
@@ -222,7 +221,7 @@ def deformation(image_path):
 
     
 
-
+#Batch processing (example here is for the deformation function, but other functions can be used too. One should be careful about adjusting the output of the batch processor according to that function. 
 def batch_process(input_dir):
     """
     Process all images in a directory using image tiling.
@@ -261,14 +260,11 @@ def batch_process(input_dir):
     
     return all_imgcolor, all_props, all_image_names, filelist
 
-input_dirr=r'C:\Users\el4003ak\Dropbox\PAPER_Bacteria_Clusters_MAY2023\Fast_camera_images\Displaced_mask_image_together\Mode_separation\Deformation'
-
+input_dirr=r'folder_path'
+#fillist is important when saving one wants to find the corresponding images of measured data
 all_imgcolor, all_prop, all_image_names, filelist  = batch_process(input_dir=input_dirr)
 
-
 all_props_1=pd.DataFrame({'area', 'eccentricity', 'major_axis_length', 'minor_axis_length'})
-
-
 
 for i, prop in enumerate(all_prop):
     pd_i = pd.DataFrame(prop)
@@ -285,17 +281,17 @@ for i, prop in enumerate(all_prop):
 all_props_1['circularity'] = 4 * all_props_1['area'] / (all_props_1['major_axis_length'] + all_props_1['minor_axis_length'])**2
 all_props_1['circularity'] = all_props_1['circularity'] * (4 / np.pi)  
 
-print(all_props_1)
-
+#Save to excel (.csv) file
 all_props_1.to_csv('deformation_data_2.csv', index=False)
 
 
 #Deformation analysis
 
 # Step 1: Read the CSV file
-file_path = r'C:\Users\el4003ak\Dropbox\PAPER_Bacteria_Clusters_MAY2023\Fast_camera_images\Displaced_mask_image_together\Mode_separation\Deformation\deformation_data_2.csv'
+file_path = r'the_csv_file_path'
 all_props_1 = pd.read_csv(file_path)
 
+#data filtering. Set it according to the data
 all_props_1 = all_props_1.loc[all_props_1['circularity'] <= 1]
 all_props_1 = all_props_1.loc[all_props_1['circularity'] >0.1]
 
@@ -306,7 +302,7 @@ all_props_1 = all_props_1.loc[all_props_1['minor_axis_length']>=1]
 all_props_1 = all_props_1.loc[all_props_1['minor_axis_length']<100]
 
 
-# Step 2: Calculate the differences
+# Step 2: Calculate the differences in circularity to quntify deformation
 differences = all_props_1.groupby('image_name').apply(lambda group: group['circularity'].diff())
 
 # Step 3: Extract the first values for each group
@@ -324,7 +320,7 @@ ax.set_title('Scatterplot with Colorbar of Circularity Difference')
 
 plt.show()
 
-
+#scatter plots to show circularity distribution for each group
 # Group by 'image_name'
 grouped_data = all_props_1.groupby('image_name')
 
