@@ -91,6 +91,28 @@ median = df_file['major_axis_length'].median()
 mode = df_file['major_axis_length'].mode().values[0]
 std_dev = df_file['major_axis_length'].std()
 
+#statistical analysis batch processing
+def stat(all_df): #all_df--> read all the dataframes that you want to compare and put them in a numppy array like this: all_dff=[df_file, df_file_2, df_file_3 ]
+    #min_values = []
+    max_values = []
+    median = []
+    mean = []
+    for df in all_df:
+        for col in df.columns[0:4]: #change the number of columns according to the dataset
+             #min_val = df[col].min()
+             max_val = df[col].max()
+             mean_val=df[col].mean()
+             median_val=df[col].median()
+             
+            # min_values.append(min_val)
+             max_values.append(max_val)
+             mean.append(mean_val)
+             median.append(median_val)
+    return print ( 'The max is', max_values, 'The mean is', mean, 'The median is', median)
+        
+#Testing the function
+stat(all_df=all_dff) 
+
 
 
 # Plotting the histogram. #different properties can be chosen to plot. Here is major_axis_length. Number of subplots depends of the number of data that are needed to compare.
@@ -211,4 +233,72 @@ ax.tick_params(axis='both', labelsize=24)
 #ax.legend(box1["boxes"][0], box2["boxes"][0], box3["boxes"][0], box4["boxes"][0], box5["boxes"][0], ['label_1', 'label_2', 'label_3','label_4','label_5'], fontsize=24
 # Show plot
 plt.savefig('file_name.pdf')
+
+
+
+#Scatter plots function which also includes vurve fitting. comment curve fitting if don't need it
+import matplotlib.colors as mcolors
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+def ploting(x_d, y_d, x_m, y_m, x_n, y_n, c_d, c_m, c_n): 
+    
+    x_values = [x_d , x_m, x_n] #
+    y_values = [y_d, y_m,  y_n] #
+    c_values = [c_d , c_m, c_n] #
+
+    fig, axs = plt.subplots(3, 1, figsize=(14, 12))  # Smaller figsize
+    
+    for i, ax in enumerate(axs.flat):
+        x = x_values[i]
+        y = y_values[i]
+        c = c_values[i]
+        x = np.maximum(x, 1e-10)
+        
+        scat = ax.scatter(x, y, c=c, cmap='rainbow')
+       
+        # Set colorbar scale to log scale
+        norm = mcolors.LogNorm(vmin=np.min(c), vmax=np.max(c))
+        cbar = fig.colorbar(scat, ax=ax) #add norm=norm if want to normalize the rainbow graph
+        cbar.ax.set_ylabel('Circularity', fontsize=14)
+        scat.set_clim(1, 300) #chnage it accordingly
+        
+        # Fit a non-linear curve to the data
+        #popt, _ = curve_fit(logarithmic_function, x, y)
+        #ax.plot(x, logarithmic_function(x, *popt), color='black', label='Non-linear fit', linewidth=0.1)
+        
+        ax.set_xlabel('Major axis', fontsize=14)
+        ax.set_ylabel('Circularity', fontsize=14)
+        ax.set_xlim(8.5,20)
+        ax.set_ylim(0, 1.2)
+       # ax.set_yscale('log')
+        ax.tick_params(axis='both', which='major', labelsize=12)
+        ax.tick_params(axis='both', which='minor', labelsize=12)
+       # ax.set_yticks(np.arange(0, 1.2, 0.1))  # Adjust max_y_value and step_size as needed
+        ax.set_title(['df_file', 'df_file_1', 'df_file_2, fontsize=14) #
+
+    fig.tight_layout(pad=3.0)
+
+    return plt.savefig('file_name.pdf')
+
+#Non-linear function to call in th eplotting function for curve fitting
+def nonlinear_function(x, a, b, c):
+    # Define the non-linear function (e.g., quadratic)
+    return a * x**2 + b * x + c
+
+# Define the logarithmic function you want to fit
+def logarithmic_function(x, a, b):
+    return a * np.log(x) + b
+
+def exponential_function(x, a, b):
+    return a * np.exp(b * x)
+
+
+def power_function(x, a, b):
+    return a * x**b
+
+def polynomial_function(x, *coefficients):
+    return np.polyval(coefficients, x)
+
+
 
