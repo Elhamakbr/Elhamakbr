@@ -406,3 +406,55 @@ def process_all_tif_images(input_folder, output_folder):
 input_folder = r'Path_to_the_folder_containing_binary_Z_stack_images'  # Change to your input folder path
 output_folder = r'Path_to_the_folder_where elipse_fitted_objects_are_being_saved'  # Change to your output folder path
 process_all_tif_images(input_folder, output_folder)
+
+
+#Step 6: Plotting data and analysis. This step groups the data saved in Pandas dataframe based on properties which narrow separates data corresponds to one object from each
+#and then plot different values
+def plot_groups(results_df):
+    plt.figure(figsize=(24, 4))
+
+    # Group by 'Image Name' 1st step to narrow down the data
+    grouped = results_df.groupby('Image Name')
+
+    # List to store unique colors for groups
+    #unique_colors = plt.cm.get_cmap('hsv', len(grouped))  # Use 'hsv' colormap for diverse colors. Use this line if you want to have different color corresponds to different group
+
+    # Iterate through each group
+    for i, (name, group) in enumerate(grouped):
+        # Skip groups with less than 3 members #to avoid ant error in matching objects or using any background-detected object
+        if len(group) < 3:
+            continue
+
+        # Iterate through each center in the group
+        for j in range(len(group)):
+            # Get the current center
+            center = group.iloc[j]
+
+            # Apply the condition to find centers close in X, Y, and similar in major axis length (within 3)
+            close_centers = group[ 
+                                  (abs(group['Center Y'] - center['Center Y']) < 10) & #Change the threshold according to data and image pixel size
+                                  (abs(group['Major Axis Length'] - center['Major Axis Length']) < 1)& #Change the value according to the type of particles. for a soft particle this value should be larger due to deformation
+                                  (group['Major Axis Length'] > 6) & #Change according to the known properties of the detected objects
+                                  (group['Major Axis Length'] < 40)]
+
+            # Only plot if there are close centers that satisfy the condition
+            if not close_centers.empty:
+                # Prepare the data for plotting
+                x_values = close_centers['Center X']
+                rotation_angles = close_centers['Rotation Angle']
+                #Other values such as Center Y, or circularity can be used instead here
+
+                # Plot the rotation angle against the center X position with different color for each group
+                plt.scatter(x_values, rotation_angles, marker='o', color='red')
+
+    # Add labels and title (no legend)
+    plt.xlabel('Center X')
+    plt.ylabel('Rotation Angle')
+    plt.title('Rotation Angle vs Center X (Filtered by Close Centers and Major Axis Length)')
+    plt.savefig('The_final_plot.pdf')
+
+# Read the data
+data = pd.read_csv(r'Path_to_CSV_file\ellipse_analysis_results.csv')
+
+# Call the plotting function with the results DataFrame
+plot_groups(data)
