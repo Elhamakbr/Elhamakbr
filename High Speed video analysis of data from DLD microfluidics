@@ -3,10 +3,17 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.ndimage import distance_transform_edt
+from scipy.spatial import distance
+from skimage.morphology import skeletonize
+from skimage.measure import label, regionprops
+from skimage.graph import route_through_array
 
-#Step 1: Cutting videos into sub-videos to reduce the size of the input data
-# Function to split the video into smaller subvideos with specific number of frames. The number of frames depends on the data collection. 
-#For this analysis, this number is equal to the number of frames recorded after detection of an objects in the camera field of view which is called triggering. 
+"""
+Step 1: Cutting videos into sub-videos to reduce the size of the input data
+Function to split the video into smaller subvideos with specific number of frames. The number of frames depends on the data collection. 
+For this analysis, this number is equal to the number of frames recorded after detection of an objects in the camera field of view which is called triggering. 
+"""
 def split_video(input_video_path, output_folder, frames_per_subvideo=200):
     # Check if the output directory exists, create it if it doesn't
     if not os.path.exists(output_folder):
@@ -73,11 +80,11 @@ frames_per_subvideo = 200  # Number of frames per subvideo
 
 split_video(input_video_path, output_folder, frames_per_subvideo)
 
-
-#Step 2 detection of objects in sub-videos. This step's code is able to detect objects in brightfield images with the low contrast between the forground and background
-#Senario one: The intensity value within one object is heterogenous and after detection there will be some area inside an object with no binary value
-#Senario two: The object has the same intesnity value in all frames and within its area
-
+"""
+Step 2 detection of objects in sub-videos. This step's code is able to detect objects in brightfield images with the low contrast between the forground and background
+Senario one: The intensity value within one object is heterogenous and after detection there will be some area inside an object with no binary value
+Senario two: The object has the same intesnity value in all frames and within its area
+"""
 def process_video(input_path, output_path, threshold_value=10):
     # Open the video
     cap = cv2.VideoCapture(input_path)
@@ -180,9 +187,10 @@ def merge_with_neighbors(thresholded_frame, contour):
         # Set the entire bounding box region to 255
         thresholded_frame[y:y + h, x:x + w] = 255
 
-
+"""
 Step 3: Creating the Z-stack of the binary videos. In this step, some frames in binary videos are removed to be able to see differen state of an object accross time distinguishable
-#from its state in the previous frames
+from its state in the previous frames
+"""
 def process_video(input_path, output_path, interval=9):   #The interval means the number of frames to remove in between and it should be chosen depending on the vidoe framerate and the objects speed
     # Open the video
     cap = cv2.VideoCapture(input_path)
@@ -294,10 +302,10 @@ input_folder = r'Path_to_all_binary_videos'
 output_folder = r'Path_to_the_folder_where_Z_stack_images_will_be_saved'
 process_all_videos(input_folder, output_folder)
 
-
-#Step 4: Anlysis of the Z-stack images
-
-#Step 4-1: In this step elipses are fitted to the objects in the binary Z-stack images and data inluding their angle, major and minor axis length and circularity is being calculated
+"""
+Step 4: Anlysis of the Z-stack images
+Step 4-1: In this step elipses are fitted to the objects in the binary Z-stack images and data inluding their angle, major and minor axis length and circularity is being calculated
+"""
 def elipse_drawing(image_path, output_path):
     # Load the grayscale image
     gray_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -407,9 +415,10 @@ input_folder = r'Path_to_the_folder_containing_binary_Z_stack_images'  # Change 
 output_folder = r'Path_to_the_folder_where elipse_fitted_objects_are_being_saved'  # Change to your output folder path
 process_all_tif_images(input_folder, output_folder)
 
-
-#Step 6: Plotting data and analysis. This step groups the data saved in Pandas dataframe based on properties which narrow separates data corresponds to one object from each
-#and then plot different values
+"""
+Step 5: Plotting data and analysis. This step groups the data saved in Pandas dataframe based on properties which narrow separates data corresponds to one object from each
+and then plot different values
+"""
 def plot_groups(results_df):
     plt.figure(figsize=(24, 4))
 
@@ -458,3 +467,162 @@ data = pd.read_csv(r'Path_to_CSV_file\ellipse_analysis_results.csv')
 
 # Call the plotting function with the results DataFrame
 plot_groups(data)
+
+#dividing data into different sub-groups. For example different circularity
+def plot_sub_groups(results_df):
+    # Create a figure with 4 subplots (2 rows, 2 columns)
+    fig, axs = plt.subplots(2, 2, figsize=(48, 8))
+    axs = axs.ravel()  # Flatten the 2x2 grid to make it easier to index
+
+    # Group by 'Image Name'
+    grouped = results_df.groupby('Image Name')
+
+    # List to store unique colors for groups
+    #unique_colors = plt.cm.get_cmap('hsv', len(grouped))  # Use 'hsv' colormap for diverse colors
+
+    # Iterate through each group
+    for i, (name, group) in enumerate(grouped):
+        # Skip groups with less than 3 members
+        if len(group) < 3:
+            continue
+
+        # Apply the previous condition (based on proximity in X, Y, and similarity in major axis length)
+        for j in range(len(group)):
+            # Get the current center
+            center = group.iloc[j]
+
+            # Apply the condition to find centers close in X, Y, and similar in major axis length (within 3)
+            close_centers = group[ 
+                                  (abs(group['Center Y'] - center['Center Y']) < 10) & 
+                                  (abs(group['Major Axis Length'] - center['Major Axis Length']) < 1)&
+                                  (group['Major Axis Length'] > 6) &
+                                  (group['Major Axis Length'] < 40)]
+
+            # Only proceed if there are close centers satisfying the previous condition
+            if not close_centers.empty:
+                # Now apply the circularity-based condition to select the appropriate subplot for plotting
+
+                # Get the circularity of the first member of the group
+                first_member_circularity = close_centers.iloc[0]['Circularity']
+
+                # Determine which subplot to use based on the first member's circularity
+                if 0 <= first_member_circularity <= 0.25:
+                    ax = axs[0]  # First subplot
+                elif 0.26 <= first_member_circularity <= 0.5:
+                    ax = axs[1]  # Second subplot
+                elif 0.51 <= first_member_circularity <= 0.75:
+                    ax = axs[2]  # Third subplot
+                elif 0.76 <= first_member_circularity <= 1:
+                    ax = axs[3]  # Fourth subplot
+                else:
+                    continue
+
+                # Prepare the data for plotting
+                x_values = close_centers['Center X']
+                rotation_angles = close_centers['Circularity']
+
+                # Plot the rotation angle against the center X position with different color for each group
+                ax.scatter(x_values, rotation_angles, marker='o', color='orange')
+
+    # Set labels and titles for each subplot
+    axs[0].set_title('Circularity 0 to 0.25')
+    axs[1].set_title('Circularity 0.26 to 0.5')
+    axs[2].set_title('Circularity 0.51 to 0.75')
+    axs[3].set_title('Circularity 0.76 to 1')
+
+    for ax in axs:
+        ax.set_xlabel('Center X')
+        ax.set_ylabel('Circularity')
+        ax.set_ylim(0,1)
+
+    # Add a global title
+    fig.suptitle('Rotation Angle vs Center X (Grouped by Proximity and Major Axis Length, Plotted by Circularity)', fontsize=16)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust layout to make room for the global title
+    plt.savefig('plots_divided_by_circularity_values.pdf')
+
+# Read the data
+# Read the data
+data = pd.read_csv(r'Path_to_CSV_file\ellipse_analysis_results.csv')
+
+# Call the plotting function with the results DataFrame
+plot_sub_groups(data)
+
+"""
+Step 6: Geometrical line fitting. This part of the code, read the plots/subplots drawn in Step 6 as images and apply basic image analysis on them and detects the center line pathing
+through the middle o the detected area corresponds to distribution of data in plots
+"""
+def process_image(image_path):
+    # Step 7-1: Read the image and convert to grayscale
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+    # Step 7-2: Apply Otsu thresholding (Initial Segmentation)
+    _, binary_image = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    binary_image = cv2.bitwise_not(binary_image)  # Invert the binary mask
+
+    # Step 7-3: Detect circles using contours. The circles are dots in scatterplot
+    contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    centers = []
+
+    # Extract center points of circles
+    for contour in contours:
+        if cv2.contourArea(contour) > 5:  # Filter small noise contours. this depends on the size of the circles in scatterplots
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+                centers.append((cX, cY))
+
+    # Step 7-4: Connect circles that are close together (Merging)
+    new_contours_image = binary_image.copy()
+    for i, center1 in enumerate(centers):
+        for center2 in centers[i+1:]:
+            if distance.euclidean(center1, center2) < 30:
+                cv2.line(new_contours_image, center1, center2, (255), thickness=2)
+
+    # Step 7-5: Re-segment the connected image (Second Segmentation)
+    resegmented_image = cv2.dilate(new_contours_image, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+
+    # Step 7-6: Divide the re-segmented area into 100 sub-areas and find center masses
+    height, width = resegmented_image.shape
+    sub_area_height = height // 50  #The code divides the detected area within the plotsinto sub-areas and find the center position of each area [center_of_mass]
+    sub_area_width = width // 50    #you can change this number based on how accurate your fitting should be. 
+
+    centers_of_mass = []
+
+    for i in range(50):
+        for j in range(50):
+            # Define the sub-area
+            sub_area = resegmented_image[i * sub_area_height:(i + 1) * sub_area_height,
+                                         j * sub_area_width:(j + 1) * sub_area_width]
+            # Calculate the center of mass of the sub-area
+            M = cv2.moments(sub_area)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"]) + j * sub_area_width
+                cY = int(M["m01"] / M["m00"]) + i * sub_area_height
+                centers_of_mass.append((cX, cY))
+
+    # Convert to NumPy array for easier indexing
+    centers_of_mass = np.array(centers_of_mass)
+
+    # Step 7-7: Sort centers of mass by x-coordinate
+    sorted_centers = centers_of_mass[np.argsort(centers_of_mass[:, 0])]
+
+    # Step 7-8: Plot the fitted line connecting centers of mass
+    plt.figure(figsize=(10, 10))
+    plt.imshow(image, cmap='gray') 
+
+    # Connect the centers of mass with a line
+    plt.plot(sorted_centers[:, 0], sorted_centers[:, 1], color='blue', linewidth=0.5) #after detecting the center masses, they are connected to each other by straight line which would be te final fitted curve
+
+    plt.title('Curvilinear Path Connecting Centers of Mass of Sub-Areas')
+    plt.axis('off')  # Hide axis for a cleaner look
+    plt.savefig('The_final_fitted_curve.pdf')
+
+
+
+# Call the function with your image path
+process_image(r'Path_to_the_plot_image')
+
+#After this step, another step is used to overlay the fitted curve with the scatterplots which is done manually by Affinity or Illustartor
+
