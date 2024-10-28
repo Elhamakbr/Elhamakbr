@@ -1,9 +1,10 @@
-#Step 1: Cutting videos into sub-videos to reduce the size of the input data
 import cv2
 import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
-
-
+#Step 1: Cutting videos into sub-videos to reduce the size of the input data
 # Function to split the video into smaller subvideos with specific number of frames. The number of frames depends on the data collection. 
 #For this analysis, this number is equal to the number of frames recorded after detection of an objects in the camera field of view which is called triggering. 
 def split_video(input_video_path, output_folder, frames_per_subvideo=200):
@@ -294,3 +295,114 @@ output_folder = r'Path_to_the_folder_where_Z_stack_images_will_be_saved'
 process_all_videos(input_folder, output_folder)
 
 
+#Step 4: Anlysis of the Z-stack images
+
+#Step 4-1: In this step elipses are fitted to the objects in the binary Z-stack images and data inluding their angle, major and minor axis length and circularity is being calculated
+def elipse_drawing(image_path, output_path):
+    # Load the grayscale image
+    gray_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+    # Apply Gaussian blur to reduce noise
+    blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
+
+    # Apply a binary threshold to the blurred image
+    _, thresholded_image = cv2.threshold(blurred_image, 128, 255, cv2.THRESH_BINARY) # this can remove any extra noises
+
+    # Find contours in the preprocessed image using cv2.RETR_CCOMP
+    contours, _ = cv2.findContours(thresholded_image, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Filter out only the external contours based on area
+    external_contours = [cnt for cnt in contours if 4000 > cv2.contourArea(cnt) > 3] # This value is based in pixels and should be adjusted depending on the properies of the detected objects
+
+    # Create an empty image to draw contours
+    contour_image = np.zeros_like(gray_image, dtype=np.uint8)
+
+    # Draw contours on the empty image
+    cv2.drawContours(contour_image, external_contours, -1, (255), thickness=2)
+
+    # Prepare lists to store ellipse properties
+    centers = []
+    rotation_angles = []
+    major_axis_lengths = []
+    minor_axis_lengths = []
+    circularities = []
+
+    # Fit ellipses to the external contours and calculate properties
+    ellipses = []
+    for contour in external_contours:
+        if len(contour) >= 5:  # FitEllipse requires at least 5 points
+            # Fit the ellipse
+            ellipse = cv2.fitEllipse(contour)
+            ellipses.append(ellipse)
+            
+            # Calculate the center of mass
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+                centers.append((cX, cY))
+            
+            # Store ellipse properties
+            major_axis_lengths.append(ellipse[1][1])  # Major axis length
+            minor_axis_lengths.append(ellipse[1][0])  # Minor axis length
+            rotation_angles.append(ellipse[2])  # Rotation angle
+            
+            # Calculate circularity. Circularity here is area/perimeter^2 
+            area = cv2.contourArea(contour)
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter != 0:
+                circularity = 4 * np.pi * (area / (perimeter ** 2))
+            else:
+                circularity = 0  # If the perimeter is 0, the circularity is 0
+            circularities.append(circularity)
+
+    # Create an empty image to draw ellipses
+    ellipse_image = np.zeros_like(gray_image, dtype=np.uint8)
+
+    # Draw ellipses on the image
+    for ellipse in ellipses:
+        cv2.ellipse(ellipse_image, ellipse, (255), thickness=2)
+
+    # Save the ellipse image
+    ellipse_output_path = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))[0]}_ellipses.png")
+    cv2.imwrite(ellipse_output_path, ellipse_image)
+
+    # Return the measured properties
+    return centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities
+
+def process_all_tif_images(input_folder, output_folder):
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Create a DataFrame to store results
+    results_df = pd.DataFrame(columns=['Image Name', 'Center X', 'Center Y', 'Rotation Angle',
+                                       'Major Axis Length', 'Minor Axis Length', 'Circularity'])
+
+    # Process all TIF or PNG images in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.png'):  #Change the file type according to your data
+            input_path = os.path.join(input_folder, filename)
+            print(f"Processing {filename}...")
+            centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities = elipse_drawing(input_path, output_folder)
+
+            # Append results to the DataFrame
+            for i, (center, rotation_angle, major_axis, minor_axis, circularity) in enumerate(zip(centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities)):
+                results_df = results_df.append({
+                    'Image Name': filename,
+                    'Center X': center[0],
+                    'Center Y': center[1],
+                    'Rotation Angle': rotation_angle,
+                    'Major Axis Length': major_axis,
+                    'Minor Axis Length': minor_axis,
+                    'Circularity': circularity
+                }, ignore_index=True)
+
+    # Save the DataFrame to a CSV file
+    results_csv_path = os.path.join(output_folder, 'ellipse_analysis_results.csv')
+    results_df.to_csv(results_csv_path, index=False)
+    print(f"Results saved to {results_csv_path}")
+
+# Example usage
+input_folder = r'Path_to_the_folder_containing_binary_Z_stack_images'  # Change to your input folder path
+output_folder = r'Path_to_the_folder_where elipse_fitted_objects_are_being_saved'  # Change to your output folder path
+process_all_tif_images(input_folder, output_folder)
