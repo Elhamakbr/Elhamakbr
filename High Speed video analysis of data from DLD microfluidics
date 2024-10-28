@@ -1,1 +1,166 @@
+#Step 1: Cutting videos into sub-videos to reduce the size of the input data
+import cv2
+import os
+
+
+
+# Function to split the video into smaller subvideos with specific number of frames. The number of frames depends on the data collection. 
+#For this analysis, this number is equal to the number of frames recorded after detection of an objects in the camera field of view which is called triggering. 
+def split_video(input_video_path, output_folder, frames_per_subvideo=200):
+    # Check if the output directory exists, create it if it doesn't
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # Open the input video
+    video_capture = cv2.VideoCapture(input_video_path)
+    total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = video_capture.get(cv2.CAP_PROP_FPS)
+    width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_size = (width, height)
+    
+    # Calculate the number of subvideos needed
+    num_subvideos = total_frames // frames_per_subvideo
+    remainder_frames = total_frames % frames_per_subvideo
+    
+    # Adjust the number of subvideos to include the remainder in the last subvideo
+    if remainder_frames > 0:
+        num_subvideos += 1
+    
+    print(f"Total frames: {total_frames}")
+    print(f"Splitting into {num_subvideos} subvideos...")
+
+    for subvideo_index in range(num_subvideos):
+        # Define the filename for each subvideo
+        output_filename = os.path.join(output_folder, f"subvideo_{subvideo_index+1}.avi")
+        
+        # Set up the video writer for each subvideo
+        video_writer = cv2.VideoWriter(
+            output_filename, 
+            cv2.VideoWriter_fourcc(*'XVID'), 
+            fps, 
+            frame_size
+        )
+
+        # Set the frame range for this subvideo
+        start_frame = subvideo_index * frames_per_subvideo
+        end_frame = min((subvideo_index + 1) * frames_per_subvideo, total_frames)  # Handle remaining frames
+        
+        print(f"Writing frames {start_frame} to {end_frame - 1} to {output_filename}")
+        
+        # Read and write frames to the subvideo
+        for frame_num in range(start_frame, end_frame):
+            video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = video_capture.read()
+            
+            if not ret:
+                break  # If we fail to read a frame, exit the loop
+            
+            video_writer.write(frame)
+        
+        # Release the writer after writing the subvideo
+        video_writer.release()
+
+    # Release the video capture object
+    video_capture.release()
+    print("All subvideos created and saved.")
+
+# Usage
+input_video_path = r'Write_the_movie_trajectory_here'  # Replace with the path to your .avi video
+output_folder = r'Write_the _address_of_the_folder_in_which_the_subvidoes_are_being_saved'  # Folder to save the subvideos
+frames_per_subvideo = 200  # Number of frames per subvideo
+
+split_video(input_video_path, output_folder, frames_per_subvideo)
+
+
+#Step 2 detection of objects in sub-videos. This step's code is able to detect objects in brightfield images with the low contrast between the forground and background
+#Senario one: The intensity value within one object is heterogenous and after detection there will be some area inside an object with no binary value
+
+def process_video(input_path, output_path, threshold_value=10):
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+    # Read all frames into a list
+    frames = []
+    for _ in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+
+    cap.release()
+
+    # Check if any frames were read
+    if len(frames) == 0:
+        print(f"No frames were read from the video: {input_path}")
+        return
+
+    # Get the last frame. Since the last frame doesn't include any object, it is used as the background
+    last_frame = frames[-1]
+
+    # Create VideoWriter to save the new video
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height - 20))  # Adjust height for cropping
+
+    # Subtract last frame from each previous frame and process. This step by subtracting the last frame (background) from rest of the frames,
+    #only leave the objects in each frame
+    for i in range(frame_count - 1):  # Skip the last frame itself
+        diff_frame = cv2.absdiff(frames[i], last_frame)  # Subtract frames
+
+        # Convert the diff_frame to grayscale
+        diff_gray = cv2.cvtColor(diff_frame, cv2.COLOR_BGR2GRAY)
+
+        # Apply threshold to filter out small differences (noise)
+        _, thresholded_frame = cv2.threshold(diff_gray, threshold_value, 255, cv2.THRESH_BINARY)
+
+        # Check if any pixels are detected
+        if cv2.countNonZero(thresholded_frame) == 0:
+            print(f"No significant changes detected in frame {i}.")
+            continue  # Skip writing an empty frame
+
+        # Find contours in the thresholded frame.
+        contours, _ = cv2.findContours(thresholded_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Merge objects with neighbors. This part of the code fullfills scenario 1 where the intesnity values in the object is not homogenous. 
+        # If an object is less than a size threshold (larger than noise), the code check the intesnity value of its neighboring pixels and if there is any difference, it merges it with its surrounding
+        for contour in contours:
+            if cv2.contourArea(contour) > 5:  # Check if the object is larger than 5 pixels
+                # Merge the object with its neighbors
+                merge_with_neighbors(thresholded_frame, contour)
+
+        # Normalize output_frame. Each frame is normalized to its own intesnity range to get the most signal in the binary videos
+        output_frame = cv2.normalize(thresholded_frame, None, 0, 255, cv2.NORM_MINMAX)
+
+        # Crop the last 20 pixels in the y direction. It is used to remove the metadata exist with the raw videos
+        output_frame_cropped = output_frame[0:frame_height - 20, :]  # Crop height
+
+        # Write the output frame to the video
+        out.write(cv2.cvtColor(output_frame_cropped, cv2.COLOR_GRAY2BGR))  # Convert back to BGR for output
+
+    out.release()
+    print(f"Processed video saved as: {output_path}")
+
+def process_all_videos(input_folder, output_folder, threshold_value=10):   #Batch processing with adjustable value of thresholding depending on the binary videos and signal to noise
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f"processed_{filename}")
+            print(f"Processing {filename}...")
+            process_video(input_path, output_path, threshold_value)
+    print("Processing completed.")
+
 
