@@ -75,6 +75,7 @@ split_video(input_video_path, output_folder, frames_per_subvideo)
 
 #Step 2 detection of objects in sub-videos. This step's code is able to detect objects in brightfield images with the low contrast between the forground and background
 #Senario one: The intensity value within one object is heterogenous and after detection there will be some area inside an object with no binary value
+#Senario two: The object has the same intesnity value in all frames and within its area
 
 def process_video(input_path, output_path, threshold_value=10):
     # Open the video
@@ -136,8 +137,8 @@ def process_video(input_path, output_path, threshold_value=10):
         for contour in contours:
             if cv2.contourArea(contour) > 5:  # Check if the object is larger than 5 pixels
                 # Merge the object with its neighbors
-                merge_with_neighbors(thresholded_frame, contour)
-
+                merge_with_neighbors(thresholded_frame, contour)    #If the intensity values are homogenous in an object, this step can be skipped. 
+                #merge_with_neighbors function is written as step 2-2 after this code
         # Normalize output_frame. Each frame is normalized to its own intesnity range to get the most signal in the binary videos
         output_frame = cv2.normalize(thresholded_frame, None, 0, 255, cv2.NORM_MINMAX)
 
@@ -162,5 +163,134 @@ def process_all_videos(input_folder, output_folder, threshold_value=10):   #Batc
             print(f"Processing {filename}...")
             process_video(input_path, output_path, threshold_value)
     print("Processing completed.")
+
+#Step 2-2
+#Merge with neighbor [embedded code in step 2 function]
+def merge_with_neighbors(thresholded_frame, contour):
+    # Get the bounding box of the contour
+    x, y, w, h = cv2.boundingRect(contour)
+
+    # Define the neighborhood region (3 pixel around)
+    neighborhood = thresholded_frame[max(0, y-1):min(thresholded_frame.shape[0], y + h + 1),
+                                      max(0, x-1):min(thresholded_frame.shape[1], x + w + 1)]
+    
+    # Check if any of the neighboring pixels are 255
+    if np.any(neighborhood == 255):
+        # Set the entire bounding box region to 255
+        thresholded_frame[y:y + h, x:x + w] = 255
+
+
+Step 3: Creating the Z-stack of the binary videos. In this step, some frames in binary videos are removed to be able to see differen state of an object accross time distinguishable
+#from its state in the previous frames
+def process_video(input_path, output_path, interval=9):   #The interval means the number of frames to remove in between and it should be chosen depending on the vidoe framerate and the objects speed
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return
+
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Create VideoWriter to save the new video
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Process frames
+    for i in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Only write frames at specified intervals
+        if i % interval == 0:
+            out.write(frame)
+
+    cap.release()
+    out.release()
+    print(f"Processed video saved as: {output_path}")
+
+#Batch processing all binary videos
+def process_all_videos(input_folder, output_folder, interval=9):
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f"processed_{filename}")
+            print(f"Processing {filename}...")
+            process_video(input_path, output_path, interval)
+    print("Processing completed.")
+
+# Example usage
+output_folder = r'Path_to_the_folder_where_frame_removed_videos are going to be saved'
+input_folder = r'Path_to_the_binary_video'
+process_all_videos(input_folder, output_folder, interval=9)
+
+#Get Z-stack images which is the maximum average intesnity accross all frames in binary videos featuring removed frames.
+
+def compute_z_stack_maximum(input_path):
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return None
+
+    max_projection = None
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Convert to grayscale for maximum projection (if not already in grayscale)
+        # Since it’s binary, we can use it directly
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Initialize max_projection if it doesn't exist
+        if max_projection is None:
+            max_projection = gray_frame.astype(np.uint8)
+        else:
+            # Update the maximum projection
+            max_projection = np.maximum(max_projection, gray_frame)
+
+    cap.release()
+    
+    # Since the max_projection is binary, we can just return it as is
+    return max_projection
+
+#Batch processing
+def process_all_videos(input_folder, output_folder):
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            print(f"Processing {filename}...")
+            z_stack_image = compute_z_stack_maximum(input_path)
+            if z_stack_image is not None:
+                # Save the Z-stack maximum image
+                output_path = os.path.join(output_folder, f"z_stack_max_{filename[:-4]}.png")
+                cv2.imwrite(output_path, z_stack_image)
+                print(f"Z-stack maximum image saved as: {output_path}")
+
+    print("Processing completed.")
+
+# Example usage
+input_folder = r'Path_to_all_binary_videos'
+output_folder = r'Path_to_the_folder_where_Z_stack_images_will_be_saved'
+process_all_videos(input_folder, output_folder)
 
 
