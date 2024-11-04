@@ -1,0 +1,349 @@
+"""
+This code explains step by step analysis of high speed videos using Python
+The Input data are assumed to be .avi files and the imaging are brightfield. 
+"""
+#Libraries
+import os
+import cv2
+import numpy as np
+import cv2
+import os
+
+
+
+#1st step:Reading avi videos and break them into small subvidoes. The function has an option to control number of frame
+#as the cutting interval. In this code, the frame interval is decided based on number of frames after trigeering in fast imaging. 
+
+# Function to split the video into smaller subvideos with 300 frames each
+def split_video(input_video_path, output_folder, frames_per_subvideo=200):
+    # Check if the output directory exists, create it if it doesn't
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # Open the input video
+    video_capture = cv2.VideoCapture(input_video_path)
+    total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = video_capture.get(cv2.CAP_PROP_FPS)
+    width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_size = (width, height)
+    
+    # Calculate the number of subvideos needed
+    num_subvideos = total_frames // frames_per_subvideo
+    remainder_frames = total_frames % frames_per_subvideo
+    
+    # Adjust the number of subvideos to include the remainder in the last subvideo
+    if remainder_frames > 0:
+        num_subvideos += 1
+    
+    print(f"Total frames: {total_frames}")
+    print(f"Splitting into {num_subvideos} subvideos...")
+
+    for subvideo_index in range(num_subvideos):
+        # Define the filename for each subvideo
+        output_filename = os.path.join(output_folder, f"subvideo_{subvideo_index+1}.avi")
+        
+        # Set up the video writer for each subvideo
+        video_writer = cv2.VideoWriter(
+            output_filename, 
+            cv2.VideoWriter_fourcc(*'XVID'), 
+            fps, 
+            frame_size
+        )
+
+        # Set the frame range for this subvideo
+        start_frame = subvideo_index * frames_per_subvideo
+        end_frame = min((subvideo_index + 1) * frames_per_subvideo, total_frames)  # Handle remaining frames
+        
+        print(f"Writing frames {start_frame} to {end_frame - 1} to {output_filename}")
+        
+        # Read and write frames to the subvideo
+        for frame_num in range(start_frame, end_frame):
+            video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = video_capture.read()
+            
+            if not ret:
+                break  # If we fail to read a frame, exit the loop
+            
+            video_writer.write(frame)
+        
+        # Release the writer after writing the subvideo
+        video_writer.release()
+
+    # Release the video capture object
+    video_capture.release()
+    print("All subvideos created and saved.")
+
+# Usage
+input_video_path = r'your_video.avi'  # Replace with the path to your .avi video
+output_folder = r'The_output_folder'  # Replace with the path of the folder in which subvideos should be saved
+frames_per_subvideo = 200  # Number of frames per subvideo
+
+split_video(input_video_path, output_folder, frames_per_subvideo)
+
+
+
+#step 2: Removing some frames in between in subvideos to be able to distinguish particles overtime.
+#Too much frames can lead to unessary data.
+
+def process_video(input_path, output_path, interval=8):   #set the interval according to the speed of the video
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return
+
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Create VideoWriter to save the new video
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Process frames
+    for i in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Only write frames at specified intervals
+        if i % interval == 0:
+            out.write(frame)
+
+    cap.release()
+    out.release()
+    print(f"Processed video saved as: {output_path}")
+
+def process_all_videos(input_folder, output_folder, interval=7):  #Batch processing
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f"processed_{filename}")
+            print(f"Processing {filename}...")
+            process_video(input_path, output_path, interval)
+    print("Processing completed.")
+
+# Example usage
+input_folder = r'folder_containing_subvideos' #Replace with the folder containing your data
+output_folder = r'folder_for_new_videos' #Replace with the path where you want to save your new videos
+process_all_videos(input_folder, output_folder, interval=8)
+
+
+
+#step 3-1: Removing DLD circles using Highcircle detection function. The code uses Hughcircle detection function to find the first circle 
+#within the frame. Then it draws an array of circles with defind distances and radius around the detected circle.
+#The parameters of the array is defined based on the DLD channel design. and the drawn array is larger than the number of circles inside the frame
+#to be sure that all circles are being covered. The circles have intensity equal to the average intensity of their surrounding pixels.
+
+def draw_circle_array(center_x, center_y, radius, rows, cols, distance, rotation_angle):
+    # Create initial positions centered around (0, 0)
+    x_positions = np.arange(-cols // 2, cols // 2) * distance
+    y_positions = np.arange(-rows // 2, rows // 2) * distance
+    center_array = np.array(np.meshgrid(x_positions, y_positions)).T.reshape(-1, 2)
+
+    # Apply rotation
+    theta = np.radians(rotation_angle)
+    rotation_matrix = np.array([[np.cos(theta), -np.sin(theta)],
+                                [np.sin(theta), np.cos(theta)]])
+    rotated_centers = center_array @ rotation_matrix
+
+    # Translate centers to the detected reference circle's coordinates
+    rotated_centers += np.array([center_x, center_y])
+
+    return rotated_centers, radius
+
+# Define the input and output directories
+input_dir = r'Path_to_the_input_folder' #Replace with your data folder path
+output_dir = r'Path_to_save_the_new_videos' #Replace with the folder path where the new videos will be saved. 
+os.makedirs(output_dir, exist_ok=True)
+
+# Loop through all video files in the input directory
+for video_file in os.listdir(input_dir):
+    if video_file.endswith('.avi'):
+        input_video_path = os.path.join(input_dir, video_file)
+        output_video_path = os.path.join(output_dir, f'output_{video_file}')
+        cap = cv2.VideoCapture(input_video_path)
+        if not cap.isOpened():
+            print(f"Error: Could not open video {video_file}.")
+            continue
+
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+
+        reference_circle = None
+        final_grid_circles = []
+        first_frame = True
+        average_intensity_for_filling = None
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced_image = clahe.apply(gray)
+            blurred_image = cv2.GaussianBlur(enhanced_image, (5, 5), 0)
+            circles = cv2.HoughCircles(blurred_image, cv2.HOUGH_GRADIENT, dp=1.0, minDist=30,
+                                       param1=100, param2=30, minRadius=30, maxRadius=35)  #the parameters should be adjusted according to geometry
+
+            if circles is not None and first_frame:
+                detected_circles = np.round(circles[0, :]).astype("int")
+                reference_circle = min(detected_circles, key=lambda c: (c[0], c[1]))
+                ref_x, ref_y, ref_r = reference_circle
+                distance = 133
+                rows, cols = 12, 24   #Parameters should be adjusted accordingly. 
+                rotation_angle = 1
+                circle_centers, radius = draw_circle_array(ref_x, ref_y, ref_r, rows, cols, distance, rotation_angle)
+                final_grid_circles = [(int(x), int(y), 49) for x, y in circle_centers]
+                first_frame = False
+
+            if reference_circle is not None:
+                ref_x, ref_y, ref_r = reference_circle
+                cv2.circle(frame, (ref_x, ref_y), ref_r, (0, 255, 0), thickness=2)
+                cv2.circle(frame, (ref_x, ref_y), 5, (0, 0, 255), thickness=-1)
+
+            if reference_circle is not None:
+                for (x, y, r) in final_grid_circles:
+                    x, y = int(x), int(y)
+                    y_start, y_end = max(0, y - r - 150), min(frame_height, y + r + 150)
+                    x_start, x_end = max(0, x - r - 150), min(frame_width, x + r + 150)
+                    surrounding_roi = frame[y_start:y_end, x_start:x_end]
+
+                    if surrounding_roi.size == 0:
+                        continue
+
+                    mask_height, mask_width = surrounding_roi.shape[:2]
+                    mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
+                    cv2.circle(mask, (mask_width // 2, mask_height // 2), min(r + 150, mask_width // 2, mask_height // 2), 255, -1)
+                    average_intensity = cv2.mean(surrounding_roi, mask=mask)[:3]
+
+                    if (x - r >= 0 and x + r < frame_width and y - r >= 0 and y + r < frame_height):
+                        cv2.circle(frame, (x, y), r, average_intensity, thickness=-1)
+                        average_intensity_for_filling = average_intensity
+                    else:
+                        cv2.circle(frame, (x, y), r, (255, 0, 0), thickness=1)
+                        if average_intensity_for_filling is not None:
+                            cv2.circle(frame, (x, y), r, average_intensity_for_filling, thickness=-1)
+
+            out.write(frame)
+
+        cap.release()
+        out.release()
+        print(f"Processing complete for {video_file}. The output video has been saved as {output_video_path}.")
+
+
+#step 3-2: Similar to step 3-1 but this time the circles are filled with white color which works as a mask for the steps where we detect the distance of the objects to the posts 
+def draw_circle_array_white(center_x, center_y, radius, rows, cols, distance, rotation_angle):
+    # Create initial positions centered around (0, 0)
+    x_positions = np.arange(-cols // 2, cols // 2) * distance
+    y_positions = np.arange(-rows // 2, rows // 2) * distance
+    center_array = np.array(np.meshgrid(x_positions, y_positions)).T.reshape(-1, 2)
+
+    # Apply rotation
+    theta = np.radians(rotation_angle)
+    rotation_matrix = np.array([[np.cos(theta), -np.sin(theta)],
+                                [np.sin(theta), np.cos(theta)]])
+    rotated_centers = center_array @ rotation_matrix
+
+    # Translate centers to the detected reference circle's coordinates
+    rotated_centers += np.array([center_x, center_y])
+
+    return rotated_centers, radius
+
+# Main processing with draw_circle_array_white
+
+# Define input and output directories
+input_dir = r'Path_to_the_input_folder' #Replace with your data folder path
+output_dir = r'Path_to_save_the_new_videos' #Replace with the folder path where the new videos will be saved. 
+os.makedirs(output_dir, exist_ok=True)
+
+# Loop through video files
+for video_file in os.listdir(input_dir):
+    if video_file.endswith('.avi'):
+        input_video_path = os.path.join(input_dir, video_file)
+        output_video_path = os.path.join(output_dir, f'output_{video_file}')
+        cap = cv2.VideoCapture(input_video_path)
+        if not cap.isOpened():
+            print(f"Error: Could not open video {video_file}.")
+            continue
+
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+
+        reference_circle = None
+        final_grid_circles = []
+        first_frame = True
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced_image = clahe.apply(gray)
+            blurred_image = cv2.GaussianBlur(enhanced_image, (5, 5), 0)
+            circles = cv2.HoughCircles(blurred_image, cv2.HOUGH_GRADIENT, dp=1.0, minDist=30,
+                                       param1=100, param2=30, minRadius=30, maxRadius=35)
+
+            if circles is not None and first_frame:
+                detected_circles = np.round(circles[0, :]).astype("int")
+                reference_circle = min(detected_circles, key=lambda c: (c[0], c[1]))
+                ref_x, ref_y, ref_r = reference_circle
+                distance = 133
+                rows, cols = 24, 24
+                rotation_angle = 1
+                circle_centers, radius = draw_circle_array_white(ref_x, ref_y, ref_r, rows, cols, distance, rotation_angle)
+                final_grid_circles = [(int(x), int(y), 49) for x, y in circle_centers]
+                first_frame = False
+
+            if reference_circle is not None:
+                ref_x, ref_y, ref_r = reference_circle
+                cv2.circle(frame, (ref_x, ref_y), ref_r, (0, 255, 0), thickness=2)
+                cv2.circle(frame, (ref_x, ref_y), 5, (0, 0, 255), thickness=-1)
+
+            if reference_circle is not None:
+                for (x, y, r) in final_grid_circles:
+                    x, y = int(x), int(y)
+                    y_start, y_end = max(0, y - r - 150), min(frame_height, y + r + 150)
+                    x_start, x_end = max(0, x - r - 150), min(frame_width, x + r + 150)
+                    surrounding_roi = frame[y_start:y_end, x_start:x_end]
+
+                    # Skip if no surrounding region exists
+                    if surrounding_roi.size == 0:
+                        continue
+
+                    mask_height, mask_width = surrounding_roi.shape[:2]
+                    mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
+                    cv2.circle(mask, (mask_width // 2, mask_height // 2), min(r + 150, mask_width // 2, mask_height // 2), 255, -1)
+
+                    # Fill circle with white color within frame boundaries
+                    if (x - r >= 0 and x + r < frame_width and y - r >= 0 and y + r < frame_height):
+                        cv2.circle(frame, (x, y), r, (255, 255, 255), thickness=-1)
+                    else:
+                        # Backup mechanism: fill with white if part of the circle is out of bounds
+                        cv2.circle(frame, (x, y), r, (255, 255, 255), thickness=-1)
+
+            out.write(frame)
+
+        cap.release()
+        out.release()
+        print(f"Processing complete for {video_file}. The output video has been saved as {output_video_path}.")
+
