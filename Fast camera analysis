@@ -342,8 +342,118 @@ for video_file in os.listdir(input_dir):
                         cv2.circle(frame, (x, y), r, (255, 255, 255), thickness=-1)
 
             out.write(frame)
-
         cap.release()
         out.release()
         print(f"Processing complete for {video_file}. The output video has been saved as {output_video_path}.")
+
+#step 4-1: the code is used to further process data analyzed in step 3-1 not step 3-2).
+#the code subtracts the last frame of the subvideos from their other frames and creates a mask video containing 
+#only the particle (without any background). This step has one side step where the function called merged_with_neighbors is used
+#to fill any missing pixels inside the detected objects. 
+
+def merge_with_neighbors(thresholded_frame, contour):
+    # Get the bounding box of the contour
+    x, y, w, h = cv2.boundingRect(contour)
+
+    # Define the neighborhood region (1 pixel around)
+    neighborhood = thresholded_frame[max(0, y-1):min(thresholded_frame.shape[0], y + h + 1), #the number of pixels can be adjusted
+                                      max(0, x-1):min(thresholded_frame.shape[1], x + w + 1)]
+    
+    # Check if any of the neighboring pixels are 255
+    if np.any(neighborhood == 255):
+        # Set the entire bounding box region to 255
+        thresholded_frame[y:y + h, x:x + w] = 255
+
+def process_video(input_path, output_path, threshold_value=10): #threshold value can remove some noises
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+    # Read all frames into a list
+    frames = []
+    for _ in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+
+    cap.release()
+
+    # Check if any frames were read
+    if len(frames) == 0:
+        print(f"No frames were read from the video: {input_path}")
+        return
+
+    # Get the last frame
+    last_frame = frames[-1]
+
+    # Create VideoWriter to save the new video
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height - 20))  # Adjust height for cropping
+
+    # Subtract last frame from each previous frame and process
+    for i in range(frame_count - 1):  # Skip the last frame itself
+        diff_frame = cv2.absdiff(frames[i], last_frame)  # Subtract frames
+
+        # Convert the diff_frame to grayscale
+        diff_gray = cv2.cvtColor(diff_frame, cv2.COLOR_BGR2GRAY)
+
+        # Apply threshold to filter out small differences (noise)
+        _, thresholded_frame = cv2.threshold(diff_gray, threshold_value, 255, cv2.THRESH_BINARY)
+
+        # Check if any pixels are detected
+        if cv2.countNonZero(thresholded_frame) == 0:
+            print(f"No significant changes detected in frame {i}.")
+            continue  # Skip writing an empty frame
+
+        # Find contours in the thresholded frame
+        contours, _ = cv2.findContours(thresholded_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Merge objects with neighbors
+       # for contour in contours:
+        #    if cv2.contourArea(contour) > 5:  # Check if the object is larger than 5 pixels
+         #       # Merge the object with its neighbors
+          #      merge_with_neighbors(thresholded_frame, contour)
+
+        # Normalize output_frame
+        output_frame = cv2.normalize(thresholded_frame, None, 0, 255, cv2.NORM_MINMAX)
+
+        # Crop the last 20 pixels in the y direction
+        output_frame_cropped = output_frame[0:frame_height - 20, :]  # Crop height
+
+        # Write the output frame to the video
+        out.write(cv2.cvtColor(output_frame_cropped, cv2.COLOR_GRAY2BGR))  # Convert back to BGR for output
+
+    out.release()
+    print(f"Processed video saved as: {output_path}")
+
+def process_all_videos(input_folder, output_folder, threshold_value=10): #Batch processing
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f"processed_{filename}")
+            print(f"Processing {filename}...")
+            process_video(input_path, output_path, threshold_value)
+    print("Processing completed.")
+
+# Example usage
+input_folder = r'Path_to_your_input_videos'
+output_folder = r'Path_to_folder_to_save_binary_videos'
+process_all_videos(input_folder, output_folder, threshold_value=10)
+
+
+        
 
