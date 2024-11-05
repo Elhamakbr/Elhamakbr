@@ -7,14 +7,13 @@ The code save outputs in each step for sanity checking.
 import os
 import cv2
 import numpy as np
-import cv2
-import os
-import cv2
-import os
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from skimage import measure, color, morphology
+from skimage.measure import label, regionprops
+from scipy.ndimage import *
+import skimage.io
+import skimage.filters
 
 
 
