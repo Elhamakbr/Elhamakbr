@@ -1,6 +1,7 @@
 """
 This code explains step by step analysis of high speed videos using Python
 The Input data are assumed to be .avi files and the imaging are brightfield. 
+The code save outputs in each step for sanity checking. 
 """
 #Libraries
 import os
@@ -8,6 +9,12 @@ import cv2
 import numpy as np
 import cv2
 import os
+import cv2
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from skimage import measure, color, morphology
 
 
 
@@ -455,5 +462,529 @@ output_folder = r'Path_to_folder_to_save_binary_videos'
 process_all_videos(input_folder, output_folder, threshold_value=10)
 
 
+#Step 4-2: This step is used for further analysis of the producted data from step 3-2. In comparison to step 4-1, this code has an additional line where the mask of the last frame
+#is overlayed with the produced mask video.
+def process_video(input_path, output_path, threshold_value=10):
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+    # Read all frames into a list
+    frames = []
+    for _ in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+
+    cap.release()
+
+    # Check if any frames were read
+    if len(frames) == 0:
+        print(f"No frames were read from the video: {input_path}")
+        return
+
+    # Get the last frame and create its mask
+    last_frame = frames[-1]
+    last_frame_gray = cv2.cvtColor(last_frame, cv2.COLOR_BGR2GRAY)
+    _, last_frame_mask = cv2.threshold(last_frame_gray, 190, 255, cv2.THRESH_BINARY)  #change threshold value according to your data. since the final frame has posts in white color, the threshold value is usually high. 
+    #Invert the binary mask
+    #last_frame_mask = np.invert(last_frame_mask)
+
+    # Display the last frame mask
+    plt.figure(figsize=(10, 10))
+    plt.imshow(last_frame_mask, cmap='gray')
+    plt.title("Last Frame Mask")
+    plt.axis('off')
+    plt.show()
+    
+
+    # Create VideoWriter to save the new video
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height - 20))  # Adjust height for cropping
+
+    # Subtract last frame from each previous frame and process
+    for i in range(frame_count - 1):  # Skip the last frame itself
+        diff_frame = cv2.absdiff(frames[i], last_frame)  # Subtract frames
+
+        # Convert the diff_frame to grayscale
+        diff_gray = cv2.cvtColor(diff_frame, cv2.COLOR_BGR2GRAY)
+
+        # Apply threshold to filter out small differences (noise)
+        _, thresholded_frame = cv2.threshold(diff_gray, threshold_value, 255, cv2.THRESH_BINARY)
+
+        # Check if any pixels are detected
+        if cv2.countNonZero(thresholded_frame) == 0:
+            print(f"No significant changes detected in frame {i}.")
+            continue  # Skip writing an empty frame
+
+        # Find contours in the thresholded frame
+        contours, _ = cv2.findContours(thresholded_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Merge objects with neighbors
+       # for contour in contours:
+            
+        #    if cv2.contourArea(contour) > 5:
+                 # Check if the object is larger than 5 pixels
+                # Merge the object with its neighbors
+         #        merge_with_neighbors(thresholded_frame, contour)
         
+        # Normalize thresholded_frame and last_frame_mask
+        normalized_frame = cv2.normalize(thresholded_frame, None, 0, 255, cv2.NORM_MINMAX)
+
+        # Overlay the last frame mask onto the thresholded frame
+       # combined_frame = cv2.bitwise_and(normalized_frame, last_frame_mask)
+        combined_frame = cv2.addWeighted(normalized_frame, 1, last_frame_mask, 1, 0)
+
+        # Crop the last 20 pixels in the y direction
+        output_frame_cropped = combined_frame[0:frame_height - 20, :]  # Crop height
+
+        # Write the output frame to the video
+        out.write(cv2.cvtColor(output_frame_cropped, cv2.COLOR_GRAY2BGR))  # Convert back to BGR for output
+
+    out.release()
+    print(f"Processed video saved as: {output_path}")
+
+
+def process_all_videos(input_folder, output_folder, threshold_value=10):
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f"processed_{filename}")
+            print(f"Processing {filename}...")
+            process_video(input_path, output_path, threshold_value)
+    print("Processing completed.")
+
+# Example usage
+input_folder = r'Path_to_the_input_file'
+output_folder = r"Path_to_the_file_to_save_new_data"
+process_all_videos(input_folder, output_folder, threshold_value=10)   
+
+
+#Step 5: Creating Z-stack of videos. The reason that the Z-stack was not created at the beginning and image processing was done over the whole videos
+#was the problem with intensity distribution in videos. Since the contrast is very low in the videos, the average Z-stack doesn't collect all signals. 
+
+def compute_z_stack_maximum(input_path):
+    # Open the video
+    cap = cv2.VideoCapture(input_path)
+
+    # Check if the video was opened successfully
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return None
+
+    max_projection = None
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Convert to grayscale for maximum projection (if not already in grayscale)
+        # Since it’s binary, we can use it directly
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Initialize max_projection if it doesn't exist
+        if max_projection is None:
+            max_projection = gray_frame.astype(np.uint8)
+        else:
+            # Update the maximum projection
+            max_projection = np.maximum(max_projection, gray_frame)
+
+    cap.release()
+    
+    # Since the max_projection is binary, we can just return it as is
+    return max_projection
+
+def process_all_videos(input_folder, output_folder):   #Batch processing
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            print(f"Processing {filename}...")
+            z_stack_image = compute_z_stack_maximum(input_path)
+            if z_stack_image is not None:
+                # Save the Z-stack maximum image
+                output_path = os.path.join(output_folder, f"z_stack_max_{filename[:-4]}.png")
+                cv2.imwrite(output_path, z_stack_image)
+                print(f"Z-stack maximum image saved as: {output_path}")
+
+    print("Processing completed.")
+
+# Example usage
+input_folder = r'Path_to_input_data'
+output_folder = r'Path_to_the_folder_to_save_new_data'
+process_all_videos(input_folder, output_folder)
+
+
+
+#Step 6-1: This step measures the X,Y position of the center of the objects, their rotation angle and size, and circularity in Z-stack images taken from videos produced in step 4-1.
+#The output is a .csv file containing these data along with the name of the images where these data are taken. 
+
+def elipse_drawing(image_path, output_path):
+    # Load the grayscale image
+    gray_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+    # Apply Gaussian blur to reduce noise
+    blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
+
+    # Apply a binary threshold to the blurred image
+    _, thresholded_image = cv2.threshold(blurred_image, 128, 255, cv2.THRESH_BINARY) #It should be set according to the data and even can be skipped if the level of noise is low
+
+    # Find contours in the preprocessed image using cv2.RETR_CCOMP
+    contours, _ = cv2.findContours(thresholded_image, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Filter out only the external contours based on area
+    external_contours = [cnt for cnt in contours if 4000 > cv2.contourArea(cnt) > 3]  #The contour minimum size is set to be lager than the size of noises. 
+
+    # Create an empty image to draw contours
+    contour_image = np.zeros_like(gray_image, dtype=np.uint8)
+
+    # Draw contours on the empty image
+    cv2.drawContours(contour_image, external_contours, -1, (255), thickness=2)
+
+    # Prepare lists to store ellipse properties
+    centers = []
+    rotation_angles = []
+    major_axis_lengths = []
+    minor_axis_lengths = []
+    circularities = []
+    areas = []
+
+    # Fit ellipses to the external contours and calculate properties
+    ellipses = []
+    for contour in external_contours:
+        if len(contour) >= 5:  # FitEllipse requires at least 5 points
+            # Fit the ellipse
+            ellipse = cv2.fitEllipse(contour)
+            width, height = ellipse[1]  # Major and minor axis lengths
+
+            # Check if the fitted ellipse has valid dimensions
+            if width > 0 and height > 0:
+                ellipses.append(ellipse)
+                
+                # Calculate the center of mass
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                    centers.append((cX, cY))
+                
+                # Store ellipse properties
+                major_axis_lengths.append(height)  # Major axis length
+                minor_axis_lengths.append(width)  # Minor axis length
+                rotation_angles.append(ellipse[2])  # Rotation angle
+
+                # Calculate and store ellipse area
+                area = np.pi * (width / 2) * (height / 2)
+                areas.append(area)
+                
+                # Calculate circularity using the specified formula
+                contour_area = cv2.contourArea(contour)
+                circularity = (4 * contour_area) / (np.pi * (height ** 2))
+                circularities.append(circularity)
+
+    # Create an empty image to draw ellipses
+    ellipse_image = np.zeros_like(gray_image, dtype=np.uint8)
+
+    # Draw ellipses on the image
+    for ellipse in ellipses:
+        cv2.ellipse(ellipse_image, ellipse, (255), thickness=2)
+
+    # Save the ellipse image
+    ellipse_output_path = os.path.join(output_path, f"{os.path.splitext(os.path.basename(image_path))[0]}_ellipses.png")
+    cv2.imwrite(ellipse_output_path, ellipse_image)
+
+    # Return the measured properties
+    return centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas
+
+def process_all_tif_images(input_folder, output_folder):  #Batch processing
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Create a DataFrame to store results
+    results_df = pd.DataFrame(columns=['Image Name', 'Center X', 'Center Y', 'Rotation Angle',
+                                       'Major Axis Length', 'Minor Axis Length', 'Circularity', 'Area'])
+
+    # Process all TIF images in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.png'):
+            input_path = os.path.join(input_folder, filename)
+            print(f"Processing {filename}...")
+            centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas = elipse_drawing(input_path, output_folder)
+
+            # Append results to the DataFrame
+            for i, (center, rotation_angle, major_axis, minor_axis, circularity, area) in enumerate(
+                zip(centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas)):
+                results_df = results_df.append({
+                    'Image Name': filename,
+                    'Center X': center[0],
+                    'Center Y': center[1],
+                    'Rotation Angle': rotation_angle,
+                    'Major Axis Length': major_axis,
+                    'Minor Axis Length': minor_axis,
+                    'Circularity': circularity,
+                    'Area': area
+                }, ignore_index=True)
+
+    # Save the DataFrame to a CSV file
+    results_csv_path = os.path.join(output_folder, 'ellipse_analysis_results.csv')
+    results_df.to_csv(results_csv_path, index=False)
+    print(f"Results saved to {results_csv_path}")
+
+# Example usage
+input_folder = r'Path_where_the_z_stack_images_are'  # Change to your input folder path
+output_folder = r'Path_to_save_the_elipse_images_and_csv_file'  # Change to your output folder path
+process_all_tif_images(input_folder, output_folder)
+
+#Step 7-1: now that the elipses are drawn and the data are extracted, the data can be plotted in different way. The following codes plot the rotation angle and Y-position of the 
+#center of the objects against the X-position of the center mass. The code applies some filters to assure that the detected objects whose data are plotted belongs to one single object 
+#Reminder_ Z-stack shows an object overtime. The filters are explained in the function
+
+def plot_groups(results_df):
+    plt.figure(figsize=(24, 12))
+
+    # Group by 'Image Name'
+    grouped = results_df.groupby('Image Name') #The first filter: put objects having the same image_name in one group.
+
+    # List to store unique colors for groups
+    #unique_colors = plt.cm.get_cmap('hsv', len(grouped))  # Use 'hsv' colormap for diverse colors in scatterplot. It can be skipped
+
+    # Iterate through each group
+    for i, (name, group) in enumerate(grouped):
+        # Skip groups with less than 3 members  #The second filter: to avoid detecting noises or any artefact, the number of objects in each group should be more than 3. 
+        if len(group) < 3:
+            continue
+
+        # Iterate through each center in the group
+        for j in range(len(group)):
+            # Get the current center
+            center = group.iloc[j]
+
+            # Apply the condition to find centers close in X, Y, and similar in major axis length (within 3)
+            close_centers = group[ 
+                                  (abs(group['Center Y'] - center['Center Y']) < 10) &  #the third filter: Since in z-stack images, one object overtime is moving almost straight, the fluctuation in Y-position is low. 
+                                  (abs(group['Major Axis Length'] - center['Major Axis Length']) < 8)&   #The 4th filter: Since the data belong to one object, the variation in size should be small in them.
+                                  (group['Major Axis Length'] > 13) & #The 5th filter: the range of the size can be set accordingly. 
+                                  (group['Major Axis Length'] < 30)]
+
+            # Only plot if there are close centers that satisfy the condition
+            if not close_centers.empty:
+                # Prepare the data for plotting
+                x_values = close_centers['Center X']*0.7
+                rotation_angles = close_centers['Rotation Angle'] #or y_values = close_centers['Center Y']*0.7 in case of plotting Y-position against X-position.
+
+                # Plot the rotation angle against the center X position with different color for each group
+                plt.scatter(x_values, rotation_angles, marker='o', color='green')  #Or use y-values instead of rotation_angles in the scatterplot for Y-X position. 
+
+    # Add labels and title (no legend)
+    plt.xlabel('Center X')
+    plt.ylabel('Rotation angle')
+    plt.savefig('final_plot.pdf')  #the format can be .png as well. 
+
+# Read the data
+data = pd.read_csv(r'Path_to_csv_file\ellipse_analysis_results.csv') #Replace with your csv file path. 
+
+# Call the plotting function with the results DataFrame
+plot_groups(data)
+
+
+#Step 6-2: This step can be done parallel to step 6-1 for the analysis of Z-stack images which contain posts. The code detects objects between posts and also detects posts as objects. To be able to 
+#detect objects very close to posts (which is usually the case for displacement), watershed segmentation is applied. 
+
+def analyze_images_watershed(input_folder, output_csv):
+    # List to store each object's measurements
+    data = []
+
+    # Loop through each image in the folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith(".tif") or filename.endswith(".png") or filename.endswith(".jpg"):
+            # Read the binary image
+            image_path = os.path.join(input_folder, filename)
+            binary_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+            # Threshold to ensure it's binary
+            _, binary_image = cv2.threshold(binary_image, 1, 255, cv2.THRESH_BINARY)
+
+            # Distance transform
+            dist_transform = cv2.distanceTransform(binary_image, cv2.DIST_L2, 3) #The parameters should be adjusted accordingly. 
+
+            # Threshold to find sure foreground
+            _, sure_fg = cv2.threshold(dist_transform, 0.1 * dist_transform.max(), 255, 0)  #0.1 can be changed accordingly. 
+            sure_fg = np.uint8(sure_fg)
+
+            # Sure background area by dilating
+            sure_bg = cv2.dilate(binary_image, np.ones((1, 1), np.uint8), iterations=4)  #low iteration detects smaller objects. 
+
+            # Find unknown region (where background and foreground overlap)
+            unknown = cv2.subtract(sure_bg, sure_fg)
+
+            # Marker labeling
+            _, markers = cv2.connectedComponents(sure_fg, connectivity=4)
+
+            # Add one to all labels to distinguish the sure background
+            markers = markers + 1
+
+            # Mark the unknown region with zero
+            markers[unknown == 255] = 0
+
+            # Apply watershed
+            markers = cv2.watershed(cv2.cvtColor(binary_image, cv2.COLOR_GRAY2BGR), markers)
+
+            # Convert labeled mask to RGB for visualization with different colors
+            imgcolor = color.label2rgb(markers, bg_label=0, kind='overlay')
+
+            # Display the last frame mask with color overlay
+            plt.figure(figsize=(10, 10))
+            plt.imshow(imgcolor)
+            plt.title("Watershed Segmentation Mask with Color Overlay")
+            plt.axis('off')
+            plt.show()
+
+            # Measure properties for each labeled region
+            for region in regionprops(markers):
+                # Filter out very small objects
+                if region.area >= 5:
+                    # Calculate circularity
+                    circularity = (region.area) / ((region.major_axis_length ** 2) * 3.14 / 4) #The definition of circularity. 
+
+                    # Append each object's data to the list
+                    data.append({
+                        "Image Name": filename,
+                        "X": region.centroid[1],
+                        "Y": region.centroid[0],
+                        "Major Axis Length": region.major_axis_length,
+                        "Minor Axis Length": region.minor_axis_length,
+                        "Circularity": circularity
+                    })
+
+    # Save the data to a pandas DataFrame and output it as a CSV
+    df = pd.DataFrame(data)
+    df.to_csv(output_csv, index=False)
+    print(f"Data saved to {output_csv}")
+
+# Example usage
+input_folder = r'Path_to_the_Z_stack_images'
+output_csv = r'Path_to_save_the_csv_file\object_measurements_watershed.csv'
+analyze_images_watershed(input_folder, output_csv)
+
+#Step 7-2: This step can be run parallel to step 7-1. The code measures the distance between the posts and the detected objects and plot them in two ways. One a histogram shows the distribution of the
+#distances and one a scatterplot shows the distances over X-position. 
+#This code also apply filters to detect right objects. The filters are explained inside the function. 
+
+def plot_groups(results_df):
+    plt.figure(figsize=(24, 8))
+
+    # Group data by image name
+    grouped_images = results_df.groupby('Image Name') #1st filter: group objects firstly based on the name of the images. 
+    
+    # Initialize a list to store y_diff values
+    y_diffs = []  #This will use later as a parameter shows the distance between the objects and the DLD posts
+
+    # Process each image group
+    for image_name, group in grouped_images:
+       # print(f"\nProcessing Image: {image_name}\n{'='*40}")
+
+        # Step 1: 2nd filter: Filter large circular objects which are DLD (circularity between 0.7 and 1, major axis length > 70)
+        circular_objects = group[(group['Circularity'] < 1.2) & (group['Circularity'] > 0.7) & (group['Major Axis Length'] > 70)]
+       # print(f"\nCircular Objects in {image_name}:\n", circular_objects)
+
+        # Step 2: Further group circular objects with center Y difference < 5 #3rd filter: posts have a small shift in y position which can be used to narrow them down into small groups.
+        circular_groups = []
+        for _, circular in circular_objects.iterrows():
+            close_objects = circular_objects[abs(circular_objects['Y'] - circular['Y']) < 5]
+            if len(close_objects) > 5:  # Create group if more than 5 objects meet the criteria
+                circular_groups.append(close_objects)
+       
+        #print(f"\nCircular Groups in {image_name}:\n", circular_groups)
+
+        # Step 3: Group remaining objects in the image based on criteria  #Here the non-circular objects refers to the particles (sorting objects)
+        non_circular_objects = group[
+            (group['Circularity'] <= 1) & 
+            (abs(group['Y'] - group['Y'].mean()) < 15) &  #The same filtering as we did in step 7-1
+            (group['Major Axis Length'] < 100)
+        ]
+       # print(f"\nNon-Circular Objects in {image_name}:\n", non_circular_objects)
+
+        other_groups = []
+        for _, obj in non_circular_objects.iterrows():
+            close_non_circular = non_circular_objects[
+                (abs(non_circular_objects['Y'] - obj['Y']) < 15) & #another filtering like step 7-1
+                (len(non_circular_objects) > 3)
+            ]
+            if len(close_non_circular) > 3:
+                other_groups.append(close_non_circular)
+       # print(f"\nOther Groups in {image_name}:\n", other_groups)
+
+        # Step 4: Find groups with Y-difference less than 80 between circular and non-circular groups
+        for circular_group in circular_groups:
+            for other_group in other_groups:
+                y_diff = circular_group['Y'].mean() - other_group['Y'].mean()
+                if abs(y_diff) < 120:        #Now the code measure the distance between the posts and detected sorting objects and id this distance is less than a threshold value, will save them. 
+                    # Store y_diff for histogram plotting
+                    y_diffs.append(y_diff)
+                    # Print the group details
+                   # print(f"\nMatching Groups in {image_name} (Y Difference < 80):")
+                    #print("Circular Group:\n", circular_group)
+                    #print("Other Group:\n", other_group)
+                    #print(f"Y Difference: {y_diff}\n")
+                    # Calculate mean X-poistion for the sorting objects group
+                    x_mean = other_group['X'].mean()
+                    
+            
+                    # Apply the transformation to the circularity value
+                    transformed_circularity = x_mean * 0.5
+                    
+                    # Apply conditional transformation to y_diff
+                    if y_diff < 0:
+                        transformed_y_diff = y_diff * 0.5 + 25  #this condition applies the pixel value effect on measuring distances and also excludes the radius of the posts in the distances to measure the distances from the edge of the posts
+                    else:
+                        transformed_y_diff = y_diff * 0.5 - 25  #The code consider particles below the posts to be in the negative distance to the posts. 
+
+                    # Scatter plot the difference between Y centers and circular group's X-center
+                    plt.scatter(
+                        transformed_circularity,     #other_groups['X'].mean() for center position
+                        transformed_y_diff, 
+                        marker='o', color='red'
+                    )
+
+    # Finalize scatter plot
+    plt.xlabel('X-position')
+    plt.ylabel('Distance to posts')
+   # plt.title('Y Difference vs Center X for Circular and Other Object Groups')
+    plt.savefig('Position_between_posts_scatter.pdf')
+    plt.show()
+
+    # Step 5: Plot the histogram of Y-differences
+    transformed_y_diffs = [y * 0.5 + 25 if y < 0 else y * 0.5 - 25 for y in y_diffs]
+    plt.figure(figsize=(12, 6))
+    plt.hist(transformed_y_diffs, color='blue')
+    plt.xlabel('Y Difference')
+    plt.ylabel('Frequency')
+    plt.title('Histogram of Y Differences')
+    #plt.xlim(-30,30)
+    plt.savefig('Position_between_posts_histogram.pdf') 
+    plt.show()
+
+# Read the data
+data = pd.read_csv(r'Path_to_the_csv_file\object_measurements_watershed.csv')
+
+# Call the plotting function with the results DataFrame
+plot_groups(data)
 
