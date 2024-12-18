@@ -1,0 +1,871 @@
+"""
+This code processes RGB flouroscent images including two channels: red, and green.
+The input images are large having a tile of 3*3 small images. The code starts with dividing
+the large images into small images, continue with correcting intesnity profile of the small 
+images by subtracting camera (dark count) and lamp intensity profile. Then, calculation on measuring the overlap 
+between two channels we done and the data were plotted for better understanding. 
+
+"""
+
+#Necessary library
+import os
+import numpy as np
+from PIL import Image
+from nd2 import ND2File  
+import pandas as pd
+from skimage import io, color
+from skimage.filters import threshold_otsu
+from skimage.segmentation import watershed
+from skimage.measure import regionprops_table, label
+from scipy.ndimage import distance_transform_edt
+from skimage.feature import peak_local_max
+import re
+import matplotlib.pyplot as plt
+
+#Sub-functions used in the main function
+#Function to crop small images to match the profile of lamp and darkness count. This function can be unnessary if all images have the same shape. 
+#the code crop the images from all 4 dimensions of the image. 
+def crop_image(image, target_height=512, target_width=512):
+    # Get the current image shape
+    height, width = image.shape
+
+    # Calculate the center coordinates for cropping
+    center_y, center_x = height // 2, width // 2
+
+    # Adjust the crop dimensions to ensure we get exactly target_height and target_width
+    crop_y1 = center_y - target_height // 2
+    crop_y2 = crop_y1 + target_height  # Ensure the correct height after crop
+    crop_x1 = center_x - target_width // 2
+    crop_x2 = crop_x1 + target_width  # Ensure the correct width after crop
+
+    # Crop the image using NumPy slicing
+    cropped_image = image[crop_y1:crop_y2, crop_x1:crop_x2]
+    
+    return cropped_image
+
+
+# Function to read ND2 files
+#The input file is ND2 files, a NIS-element image file. 
+def read_nd2_file(file_path):
+    with ND2File(file_path) as nd2_file:
+        image_data = nd2_file.asarray()  # Read image data as NumPy array
+        print(f"Loaded ND2 file {file_path}, shape: {image_data.shape}")
+    return image_data
+
+
+#Function to split large images (with tile of 3*3 images) into small images
+def split_channels_into_subimages(input_file, output_folder):
+    # Read the image data from the ND2 file
+    image_data = read_nd2_file(input_file)
+
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Extract red and green channels from the image_data array
+    red_channel = image_data[0, :, :]  # First channel (red)
+    green_channel = image_data[1, :, :]  # Second channel (green)
+
+    # Get the size of the input image (assuming it's square and the same size for both channels)
+    height, width = red_channel.shape
+
+    # Define the size of the subimages (3x3 grid)
+    subimage_height = height // 3
+    subimage_width = width // 3
+
+    # Iterate through each subimage index (3x3 grid)
+    for i in range(3):
+        for j in range(3):
+            # Extract the subimage from the red channel
+            red_subimage = red_channel[i*subimage_height:(i+1)*subimage_height, j*subimage_width:(j+1)*subimage_width]
+            
+            # Extract the subimage from the green channel
+            green_subimage = green_channel[i*subimage_height:(i+1)*subimage_height, j*subimage_width:(j+1)*subimage_width]
+            
+            # Save the subimages as individual image files
+            red_subimage_filename = os.path.join(output_folder, f'red_subimage_{i}_{j}.png')
+            green_subimage_filename = os.path.join(output_folder, f'green_subimage_{i}_{j}.png')
+            
+            # Save as PNG images using PIL
+            Image.fromarray(red_subimage).save(red_subimage_filename)
+            Image.fromarray(green_subimage).save(green_subimage_filename)
+
+"""
+MAIN FUNCTION 1
+Prior to image analysis, images of the lamp profile were taken. The lamps (both blue for 488nm flourophore and red for 640nm flourophore)
+were turned while shining on glass slides kits, their shining profiles were taken by taking images. The darkness count which shouws the background
+signals coming from camera and it was taken while all lamps were off and only the camera was on. These images were used to normalize and subtract 
+background and noise signal from the input images.
+"""
+# Function to process PNG and ND2 images, and apply the correction
+def process_images(input_folder, darkness_file, red_lamp_file, green_lamp_file, output_parent_folder):
+    # Read the darkness, red lamp, and green lamp ND2 images
+    darkness = np.array(Image.open(darkness_file), dtype=np.float32)
+    red_lamp = np.array(Image.open(red_lamp_file), dtype=np.float32)
+    green_lamp = np.array(Image.open(green_lamp_file), dtype=np.float32)
+    
+     # Crop the images to 495x495
+    darkness = crop_image(darkness)
+    red_lamp = crop_image(red_lamp)
+    green_lamp = crop_image(green_lamp)
+    
+    # Calculate the average intensities
+    average_darkness = np.mean(darkness)
+    average_red_lamp = np.mean(red_lamp)
+    average_green_lamp = np.mean(green_lamp)
+
+    # Iterate through all ND2 files in the input folder
+    for nd2_filename in os.listdir(input_folder):
+        if nd2_filename.endswith(".nd2"):  # Only process .nd2 files
+            nd2_file_path = os.path.join(input_folder, nd2_filename)
+
+            # Create an output folder for this specific ND2 file
+            output_folder = os.path.join(output_parent_folder, os.path.splitext(nd2_filename)[0])
+            os.makedirs(output_folder, exist_ok=True)
+
+            # Process the ND2 file to extract channels and apply corrections
+            print(f"Processing file: {nd2_filename}")
+            split_channels_into_subimages(nd2_file_path, output_folder)
+
+            # Now process all PNG images in the folder for background correction
+            png_folder = output_folder
+            for filename in os.listdir(png_folder):
+                if filename.endswith(".png"):
+                    image_path = os.path.join(png_folder, filename)
+                    image_data = np.array(Image.open(image_path), dtype=np.float32)
+                    # Subtract darkness, ensuring no negative values
+                    image_data = np.maximum(image_data - darkness, 0)
+
+                    # Perform the correction based on the image name (green or red)
+                    if "green" in filename.lower():
+                        corrected_green = (image_data - darkness) / (((green_lamp) - darkness) / (green_lamp+ 1e-6))
+                        #corrected_green = (image_data - average_darkness) / (((average_green_lamp) - average_darkness) / (average_green_lamp))
+                        print((average_green_lamp - average_darkness) /average_green_lamp)
+                        # Normalize the corrected image to the [0, 255] range
+                        corrected_green = (corrected_green - np.min(corrected_green)) / (np.max(corrected_green) - np.min(corrected_green)) * 255
+
+
+                        # Normalize the corrected image to [0, 255] range (if necessary)
+                        corrected_green = np.clip(corrected_green, 0, 255)
+                        corrected_green = corrected_green.astype(np.uint8)  # Convert to uint8 before saving
+                        corrected_filename = os.path.join(output_folder, f"corrected_green_{filename}")
+                        Image.fromarray(corrected_green).save(corrected_filename)
+                    elif "red" in filename.lower():
+                        corrected_red = (image_data - darkness) / (((red_lamp) - darkness) / ((red_lamp) + 1e-6))
+                        #corrected_red = (image_data - average_darkness) / (((average_red_lamp) - average_darkness) / (average_red_lamp))
+                        print((average_red_lamp - average_darkness) /average_red_lamp)
+                            # Normalize the corrected image to the [0, 255] range
+                        corrected_red = (corrected_red - np.min(corrected_red)) / (np.max(corrected_red) - np.min(corrected_red)) * 255
+                        # Normalize the corrected image to [0, 255] range (if necessary)
+                        corrected_red = np.clip(corrected_red, 0, 255)
+                        corrected_red = corrected_red.astype(np.uint8)  # Convert to uint8 before saving
+                        corrected_filename = os.path.join(output_folder, f"corrected_red_{filename}")
+                        Image.fromarray(corrected_red).save(corrected_filename)
+
+# Example usage:
+input_folder = r'Path_to_the_folder_having_input_ND2_files'  # Folder containing the ND2 files
+darkness_file = r'Path_to_the_average_image_from_images_taken_of_the_camera_(darkness)'
+red_lamp_file = r'Path_to_the_average_image_from_images_taken_of_red_lamp'
+green_lamp_file = r'Path_to_the_average_image_from_images_taken_of_green_lamp'
+output_parent_folder = r'Path_to_the_folder_to_save_output_images'
+
+"""
+A side function: There is a leaking factor from red channel to green channel which was seen when only single color sample was imaged.
+To remove this leaking factor, this function was used which remove signals coming leaking from red to green.
+There was no leaking visa versa. the leaking factor is calculated as the ratio between the mean intensity of red/green channel. 
+"""
+def correct_red(input_path, imag1_path, output_path, leakage_factor=0.38):
+    """
+    Reads a .tif file and a second image (imag1) from the input paths, applies corrections, and saves the result to the output path.
+
+    Parameters:
+        input_path (str): Path to the input .tif file.
+        imag1_path (str): Path to the second .tif file (imag1) for correction.
+        output_path (str): Path to save the output .tif file.
+        leakage_factor (float): Leakage correction factor.
+    """
+    try:
+        # Open the .tif images
+        with Image.open(input_path) as img, Image.open(imag1_path) as imag1:
+            img_array = np.array(img, dtype=np.float32)
+            imag1_array = np.array(imag1, dtype=np.float32)
+
+            # Apply the correction
+            corrected_img = img_array - (leakage_factor * imag1_array)
+            corrected_img = np.clip(corrected_img, 0, np.max(corrected_img))
+
+            # Convert back to PIL Image and save
+            corrected_img = Image.fromarray(corrected_img.astype(np.uint8))
+            corrected_img.save(output_path, format="TIFF")
+
+        print(f"Image successfully saved to: {output_path}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+# Batch processing function
+def batch_process(input_folder, output_folder, leakage_factor=0.38):
+    """
+    Batch processes all images in a folder, matching "red" and "green" images by their numbering.
+
+    Parameters:
+        input_folder (str): Path to the folder containing the images.
+        output_folder (str): Path to the folder where corrected images will be saved.
+        leakage_factor (float): Leakage correction factor.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Get a list of all files in the input folder
+    all_files = os.listdir(input_folder)
+
+    # Separate "red" and "green" images
+    red_images = [f for f in all_files if "corrected_red" in f and f.endswith(".png")]
+    green_images = [f for f in all_files if "corrected_green" in f and f.endswith(".png")]
+
+    # Create a dictionary for green images keyed by their number
+    green_dict = {re.search(r"(\d+_\d+)", img).group(1): img for img in green_images if re.search(r"(\d+_\d+)", img)}
+
+    # Process each red image
+    for red_image in red_images:
+        match = re.search(r"(\d+_\d+)", red_image)
+        if not match:
+            print(f"Skipping red image with no matching number: {red_image}")
+            continue
+
+        red_number = match.group(1)
+
+        # Check if there is a matching green image
+        if red_number not in green_dict:
+            print(f"No matching green image found for: {red_image}")
+            continue
+
+        # Paths for input red and green images
+        input_path = os.path.join(input_folder, red_image)
+        imag1_path = os.path.join(input_folder, green_dict[red_number])
+
+        # Output path
+        output_path = os.path.join(output_folder, red_image)  # Save with the same name as the red image
+
+        # Perform correction
+        correct_red(input_path, imag1_path, output_path, leakage_factor)
+
+# Example usage
+input_folder = r"Path_to_red_images"
+output_folder = r"Output_path"
+
+batch_process(input_folder, output_folder)
+
+
+
+
+"""
+MAIN FUNCTION 2
+This function Reads the images generated from the previous main function 1, segment each images (with extra step of watershed segmentation
+if the clusters are close to each other in the images) and save the binary images as well as segmented color-labelled images. 
+It also saves the detected objects' properties including their major/minor axis, area, and Center coordinates (x, and Y). 
+"""
+
+# Input folders for green and red channels
+green_channel_folder = r"E:\Elham\two-color-experiment-22-NOV-2024\only_green_batch\001"
+red_channel_folder = r"E:\Elham\two-color-experiment-22-NOV-2024\only_green_batch\001\factored_red"
+
+# Output folders for binary images and color-labeled images
+output_dir_binary_images = r"E:\Elham\two-color-experiment-22-NOV-2024\only_green_batch\001\binary_images"
+output_dir_color_labelled = r"E:\Elham\two-color-experiment-22-NOV-2024\only_green_batch\001\color-labelled"
+os.makedirs(output_dir_binary_images, exist_ok=True)
+os.makedirs(output_dir_color_labelled, exist_ok=True)
+
+def process_channel(channel_folder, output_binary_folder, output_color_folder, channel_name, filter_keyword=None):
+    all_files = [f for f in os.listdir(channel_folder) if f.endswith('.png') and (filter_keyword in f if filter_keyword else True)]
+    regionprops_list = []
+
+    for file in all_files:
+        # Read the image
+        image_path = os.path.join(channel_folder, file)
+        image = io.imread(image_path)
+
+        # Thresholding
+        threshold = threshold_otsu(image)
+        binary_image = image > threshold
+
+        # Distance transform and watershed segmentation
+        distance = distance_transform_edt(binary_image)
+        local_maxi = peak_local_max(
+            distance, indices=False, footprint=np.ones((20, 20)), labels=binary_image
+        )
+        markers = label(local_maxi)
+        labels = watershed(-distance, markers, mask=binary_image)
+
+        # Save binary image
+        binary_output_path = os.path.join(output_binary_folder, f"{channel_name}_{os.path.splitext(file)[0]}_binary.tif")
+        io.imsave(binary_output_path, binary_image.astype(np.uint8) * 255)
+
+        # Save color-labeled image
+        colored_labels = color.label2rgb(labels, bg_label=0, bg_color=(0, 0, 0), kind="overlay")
+        color_output_path = os.path.join(output_color_folder, f"{channel_name}_{os.path.splitext(file)[0]}_colored_labels.tif")
+        io.imsave(color_output_path, (colored_labels * 255).astype(np.uint8))
+
+        # Measure region properties
+        props = regionprops_table(
+            labels,
+            properties=["label", "area", "centroid", "major_axis_length", "minor_axis_length"]
+        )
+        props_df = pd.DataFrame(props)
+        props_df["Image Name"] = file  # Add image name column
+        regionprops_list.append(props_df)
+
+    # Combine all region properties into a single DataFrame
+    combined_df = pd.concat(regionprops_list, ignore_index=True)
+    combined_df.columns = [
+        "Label", "Area", "Center Y", "Center X", "Major Axis Length", "Minor Axis Length", "Image Name"
+    ]
+
+    # Save the combined region properties to a CSV file
+    csv_output_path = os.path.join(output_binary_folder, f"{channel_name}_channel_properties.csv")
+    combined_df.to_csv(csv_output_path, index=False)
+
+# Process green and red channels
+process_channel(green_channel_folder, output_dir_binary_images, output_dir_color_labelled, "green", filter_keyword="corrected")
+process_channel(red_channel_folder, output_dir_binary_images, output_dir_color_labelled, "red")
+
+print("Batch processing complete! Binary, color-labeled images, and CSV files saved.")
+
+"""
+A side function: The function splitting the csv file coming as an output from main function 2 by the name of the images. This way the data from each red/green 
+images are saved in a separate csv files. analyzing the csv file of each pair separately is faster than reading the csv file having all images data and separate 
+each images data while analyzing. 
+"""
+def split_csv_by_image_name(csv_files, output_folder):
+    # Ensure the output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    for csv_file in csv_files:
+        # Read the CSV file
+        df = pd.read_csv(csv_file)
+
+        # Check if 'Image Name' column exists
+        if 'Image Name' not in df.columns:
+            print(f"Skipping {csv_file} as it doesn't contain 'Image Name' column.")
+            continue
+
+        # Group by 'Image Name'
+        grouped = df.groupby('Image Name')
+
+        # Create smaller CSV files for each group
+        for image_name, group in grouped:
+            # Create a valid filename
+            safe_image_name = image_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+            output_file = os.path.join(output_folder, f"{safe_image_name}.csv")
+
+            # Save the group to a new CSV file
+            group.to_csv(output_file, index=False)
+            print(f"Saved: {output_file}")
+
+# Input CSV files
+csv_files = [r"Path_to_CSV_file_containing_data_from_green_images", 
+             r"Path_to_CSV_file_containing_data_from_red_images"]
+
+# Output folder to save smaller CSV files
+output_folder = r"Path_to_folder_saving_the_splitted_csv_files"
+
+# Run the function
+split_csv_by_image_name(csv_files, output_folder)
+
+
+"""
+MAIN FUNCTION 3
+Calculating the overlap between the two channels. The code reads green, red images and csv files of all images, match them based on their name and finds the objects
+that has the center positions apart from each other by a specific radius. If they are in this radius and can be detected in a single objects in the image, they are
+considered as the overlap between the two channels (red and green). The intensity value of 255 is assigned to these objects. For the rest of the detected objects
+in both channels (red and green) an intesnit of 128 was assigned. The background has the intensity of 0. These data are saved in image format.
+"""
+def read_and_pair_images(folder_path):
+    """
+    Reads .tif images from a folder, pairs images with "red" in the name with those 
+    having the same number but without "red" in the name, and calculates pixel overlap.
+    """
+    # Get a list of all .tif files in the folder
+    image_files = [f for f in os.listdir(folder_path) if f.endswith('.tif')]
+
+    # Create a dictionary to group files by their unique numeric identifier
+    image_dict = {}
+
+    for file_name in image_files:
+        # Extract the numeric identifier from the file name
+        match = re.search(r'_subimage_(\d+_\d+)_binary', file_name)
+        if match:
+            identifier = match.group(1)
+            if identifier not in image_dict:
+                image_dict[identifier] = []
+            image_dict[identifier].append(file_name)
+
+    # Pair images based on "red" and non-red identifiers
+    paired_images = []
+    for identifier, files in image_dict.items():
+        red_image = None
+        non_red_image = None
+
+        for file_name in files:
+            if 'red' in file_name:
+                red_image = file_name
+            else:
+                non_red_image = file_name
+
+        if red_image and non_red_image:
+            paired_images.append((non_red_image, red_image))
+
+    return paired_images
+
+def calculate_pixel_overlap(x1, y1, x2, y2, img1_binary, img2_binary, radius=150):
+    """
+    Calculate the pixel overlap area between two regions around (x1, y1) and (x2, y2) in the binary images.
+    The regions are assumed to be square with side length 2*radius.
+    """
+    # Define the bounding boxes for both objects, centered at (x1, y1) and (x2, y2)
+    min_x1 = max(int(x1 - radius), 0)
+    max_x1 = min(int(x1 + radius), img1_binary.shape[1])
+    min_y1 = max(int(y1 - radius), 0)
+    max_y1 = min(int(y1 + radius), img1_binary.shape[0])
+
+    min_x2 = max(int(x2 - radius), 0)
+    max_x2 = min(int(x2 + radius), img2_binary.shape[1])
+    min_y2 = max(int(y2 - radius), 0)
+    max_y2 = min(int(y2 + radius), img2_binary.shape[0])
+
+    # Extract the regions from the binary images (ensuring they are within bounds)
+    region1 = img1_binary[min_y1:max_y1, min_x1:max_x1]
+    region2 = img2_binary[min_y2:max_y2, min_x2:max_x2]
+
+    # If the regions are of different shapes, resize the smaller one to match the larger one
+    if region1.shape != region2.shape:
+        # Resize region2 to match region1's shape
+        if region1.shape[0] != region2.shape[0] or region1.shape[1] != region2.shape[1]:
+            region2 = np.resize(region2, region1.shape)
+
+    # Calculate the overlap using pixel-wise logical AND (intersection)
+    overlap_area = np.sum(region1 & region2)  # Pixel-wise logical AND (overlap)
+
+    return overlap_area
+
+def adjust_image_name(image_name, prefix):
+    """
+    Adjusts the image name by removing a specific prefix ('green_' or 'red_') and
+    changing the file extension from .tif to .png.csv.
+    """
+    adjusted_name = re.sub(f"^{prefix}_", "", image_name)
+    adjusted_name = adjusted_name.replace("_binary.tif", ".png.csv")
+    return adjusted_name
+
+def process_image_pairs(input_dir, output_dir_images, output_csv_path, csv_folder, radius=150):
+    """
+    Processes image pairs, calculates pixel overlap, and saves the results.
+    
+    Parameters:
+        input_dir (str): Directory containing the image pairs.
+        output_dir_images (str): Directory to save overlay images.
+        output_csv_path (str): Path to save the overlap data CSV file.
+        csv_folder (str): Folder containing the CSV files for object properties.
+        radius (int): Radius for calculating pixel overlap.
+    """
+    # Ensure output directory exists
+    os.makedirs(output_dir_images, exist_ok=True)
+
+    # Initialize data storage for overlaps
+    overlap_data = []
+
+    # Pair images in the input directory
+    paired_images = read_and_pair_images(input_dir)
+
+    for non_red_image_name, red_image_name in paired_images:
+        # Read the images as binary
+        non_red_image_path = os.path.join(input_dir, non_red_image_name)
+        red_image_path = os.path.join(input_dir, red_image_name)
+
+        img1_binary = cv2.imread(non_red_image_path, cv2.IMREAD_GRAYSCALE) > 0
+        img2_binary = cv2.imread(red_image_path, cv2.IMREAD_GRAYSCALE) > 0
+
+        # Adjust image names to get corresponding CSV files
+        csv1_name = adjust_image_name(non_red_image_name, "green")
+        csv2_name = adjust_image_name(red_image_name, "red")
+
+        csv1_path = os.path.join(csv_folder, csv1_name)
+        csv2_path = os.path.join(csv_folder, csv2_name)
+
+        # Debugging: Print paths of the CSV files
+        print(f"Checking CSV files: {csv1_path}, {csv2_path}")
+
+        # Check if both CSV files exist
+        if not os.path.exists(csv1_path) or not os.path.exists(csv2_path):
+            print(f"Skipping pair ({non_red_image_name}, {red_image_name}) due to missing CSV files.")
+            continue
+
+        # Read the CSV files for object properties
+        df1 = pd.read_csv(csv1_path)
+        df2 = pd.read_csv(csv2_path)
+
+        # Initialize overlap count
+        overlapping_count = 0
+
+        # Compare objects in both CSV files
+        for _, obj1 in df1.iterrows():
+            for _, obj2 in df2.iterrows():
+                # Get the coordinates of each object
+                x1, y1 = obj1["Center X"], obj1["Center Y"]
+                x2, y2 = obj2["Center X"], obj2["Center Y"]
+
+                # Calculate pixel-wise overlap
+                overlap_area = calculate_pixel_overlap(x1, y1, x2, y2, img1_binary, img2_binary, radius)
+
+                # If overlap area is greater than a threshold, count it as an overlap
+                if overlap_area > 0:
+                    overlapping_count += 1
+
+        # Create overlay image
+        img1_with_boxes = cv2.imread(non_red_image_path)
+        img2_with_boxes = cv2.imread(red_image_path)
+        overlay_img = cv2.addWeighted(img1_with_boxes, 0.5, img2_with_boxes, 0.5, 0)
+
+        # Save the overlay image
+        overlay_image_name = non_red_image_name.replace(".tif", "_overlay.tif")
+        Image.fromarray(overlay_img).save(os.path.join(output_dir_images, overlay_image_name))
+
+        # Append overlap data
+        overlap_data.append({
+            "overlay_image": overlay_image_name,
+            "objects_in_img1": len(df1),
+            "objects_in_img2": len(df2),
+            "overlapping_objects": overlapping_count
+        })
+
+    # Save overlap data to a CSV file
+    overlap_df = pd.DataFrame(overlap_data)
+    overlap_df.to_csv(output_csv_path, index=False)
+    print("Processing complete! Overlay images and overlap data saved.")
+
+# Main function
+def main():
+    input_dir = r"Path_to_binary_images_of_the_two_channels"  # Replace with your input directory
+    output_dir_images = r"Path_to_the_folder_to_save_the_overlay_images"
+    output_csv_path = r"Path_to_the_folder_to_save_the_overlay_csv_file"
+    csv_folder = r'Path_to_the_folder_with_csv_files'  # Replace with your second CSV file name
+
+    process_image_pairs(input_dir, output_dir_images, output_csv_path, csv_folder)
+
+if __name__ == "__main__":
+    main()
+
+
+
+#this function applies a threshold to the overlay images, detects objects with 128 intensity value and if the detected objects has intensity value of 255
+#in it, count that as an overlapped object. the function save the output binary images containing only overlapped objects.
+
+# Function to process a single image
+def process_image(input_image_path, output_image_path):
+    # Read the image in grayscale
+    img = cv2.imread(input_image_path, cv2.IMREAD_GRAYSCALE)
+
+    # Create a blank image to store the result
+    result_img = np.zeros_like(img)
+
+    # Detect contours in the image
+    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Iterate over each contour
+    for contour in contours:
+        # Create a mask for the current contour
+        mask = np.zeros_like(img)
+        cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+
+        # Check if both 128 and 255 are present in the contour region
+        region_values = img[mask == 255]
+        if 128 in region_values and 255 in region_values:
+            # Fill the contour with 255 in the result image
+            cv2.drawContours(result_img, [contour], -1, 255, thickness=cv2.FILLED)
+
+    # Save the processed image
+    cv2.imwrite(output_image_path, result_img)
+    print(f"Processed image saved at {output_image_path}")
+
+# Function for batch processing images in a folder
+def batch_process_images(input_folder, output_folder):
+    # Get all .tif files in the input folder
+    image_files = [f for f in os.listdir(input_folder) if f.endswith('.tif')]
+
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process each image
+    for image_file in image_files:
+        input_image_path = os.path.join(input_folder, image_file)
+        output_image_path = os.path.join(output_folder, image_file)
+
+        # Process the image
+        process_image(input_image_path, output_image_path)
+
+
+# Example usage
+# Replace these paths with your actual folder paths
+input_folder = r"Path_fo_the_folder_with_overlay_images"
+output_folder =r"Path_to_the_output_images_including_only_overlapped_objects"
+batch_process_images(input_folder, output_folder)
+
+
+"""
+MAIN FUNCTION 3:
+The last main function reads the binary images only including overlapped objects, and count the total number of objects
+"""
+#This code read csv files and text file contining data of detected objects and overlapped objects and read the number of each.
+# Define the folder path and output file
+folder_path = r"Path_to_the_folder_contining_the txt and csv files"  # Replace with your folder path
+output_file = os.path.join(folder_path, "summary_statistics.csv")
+
+# Initialize lists to store values
+green_counts = []
+red_counts = []
+overlay_values = []
+pair_sums = []
+
+# Iterate through the files in the folder
+for file_name in os.listdir(folder_path):
+    file_path = os.path.join(folder_path, file_name)
+    
+    if file_name.endswith(".csv"):
+        if "green_channel_properties" in file_name:
+            # Read the CSV file
+            df = pd.read_csv(file_path)
+            # Count the number of rows in the dataframe
+            green_counts.append(len(df))
+        
+        elif "red_channel_properties" in file_name:
+            # Read the CSV file
+            df = pd.read_csv(file_path)
+            # Remove rows where 'Major Axis Length' is less than 5
+            filtered_df = df[df["Major Axis Length"] >= 5]
+            # Count the number of rows in the filtered dataframe
+            red_counts.append(len(filtered_df))
+    
+    elif file_name.endswith(".txt"):
+        with open(file_path, "r") as file:
+            # Read the text file and extract the first numeric value found
+            for line in file:
+                try:
+                    number = float("".join(filter(lambda x: x.isdigit() or x == '.', line)))
+                    overlay_values.append(number)
+                    break
+                except ValueError:
+                    continue
+
+# Compute sums of corresponding green and red channel counts
+for green, red in zip(green_counts, red_counts):
+    pair_sums.append(green + red)
+
+# Compute averages and standard deviations
+green_avg, green_std = np.mean(green_counts), np.std(green_counts)
+red_avg, red_std = np.mean(red_counts), np.std(red_counts)
+overlay_avg, overlay_std = np.mean(overlay_values), np.std(overlay_values)
+pair_sums_avg, pair_sums_std = np.mean(pair_sums), np.std(pair_sums)
+
+# Create a dataframe for the output
+summary_df = pd.DataFrame({
+    "Category": [
+        "green_channel_properties", 
+        "red_channel_properties", 
+        "overlay",
+        "pair_sums"
+    ],
+    "Average": [
+        green_avg, 
+        red_avg, 
+        overlay_avg, 
+        pair_sums_avg
+    ],
+    "Standard Deviation": [
+        green_std, 
+        red_std, 
+        overlay_std, 
+        pair_sums_std
+    ]
+})
+
+# Save the summary to a new CSV file
+summary_df.to_csv(output_file, index=False)
+
+print(f"Summary statistics saved to {output_file}")
+
+
+#Plot the ratio of the overlapped objects to the total number of objects in a bar chart format
+# Define the folder path
+folder_path = r"Path_to_the_folder_has_the summary_statistics_of_each_experiment"  # Replace with your folder path
+
+# Define the desired sequence of suffixes
+time_suffixes = ["_0h", "_4h", "_8h", "_12h", "_24h", "_32h"]
+
+# Initialize a list to store the data for plotting
+plot_data = []
+
+# Iterate through the files in the folder
+for file_name in os.listdir(folder_path):
+    if file_name.endswith(".csv") and "summary_statistics_" in file_name:
+        file_path = os.path.join(folder_path, file_name)
+        
+        # Read the CSV file into a DataFrame
+        df = pd.read_csv(file_path)
+        
+        # Extract the average values for overlay and pair_sums
+        overlay_avg = df.loc[df["Category"] == "overlay", "Average"].values[0]
+        pair_sums_avg = df.loc[df["Category"] == "pair_sums", "Average"].values[0]
+        
+        # Calculate the average ratio
+        avg_ratio = overlay_avg / pair_sums_avg if pair_sums_avg != 0 else 0
+        
+        # Extract the suffix from the file name
+        cleaned_file_name = file_name.replace("summary_statistics_", "").replace(".csv", "")
+        for suffix in time_suffixes:
+            if file_name.endswith(f"{suffix}.csv"):
+                plot_data.append((suffix, cleaned_file_name, avg_ratio))
+                break
+
+# Sort the data by the desired time_suffix order
+plot_data_sorted = sorted(plot_data, key=lambda x: time_suffixes.index(x[0]))
+
+# Extract x-axis labels and y-values
+x_labels = [data[1] for data in plot_data_sorted]  # Full cleaned file names
+y_values = [data[2] for data in plot_data_sorted]  # Average ratios
+
+# Plot the bar chart
+plt.figure(figsize=(32, 18))
+plt.bar(x_labels, y_values, color="darkgreen", edgecolor="black", linewidth=3)
+
+# Customize the axis borders
+ax = plt.gca()  # Get the current axis
+for spine in ax.spines.values():
+    spine.set_linewidth(3)  # Set thickness of plot borders
+
+# Add labels, title, and formatting
+#plt.xlabel("File Names", fontsize=40)
+plt.ylabel("overlapped clusters/All clusters", fontsize=40)
+plt.ylim(0, 0.1)
+#plt.title("Average Ratios Across Time Points", fontsize=40)
+plt.xticks(fontsize=40, rotation=45, ha="right")
+plt.yticks(fontsize=30)
+plt.tight_layout()
+
+# Show the plot
+plt.savefig(r'Path_to_save_the_final_plot\image.pdf')
+
+
+
+#Side function: concatenate all the csv files of an experiment (experiments were repeated 3 times). 
+
+folder_path = r'Path_to_the_folder_with_CSV_files'
+
+dfs = []
+
+for filename in os.listdir(folder_path):
+    if filename.endswith(".csv"):  # You can change the file extension as needed
+        file_path = os.path.join(folder_path, filename)
+        df = pd.read_csv(file_path)
+        dfs.append(df)
+
+final_df = pd.concat(dfs, ignore_index=True)
+final_df
+
+
+final_df.to_csv('final_concatenated_file.csv', index=False)
+
+
+#Histogram plotting the red and green objects sizes (major axis length) 
+folder_path = r"Path_to_the_folder_having_concatenated_files"
+# Initialize a dictionary to group files by the shared number in their filenames
+grouped_files = {}
+
+# Group files based on the shared number in their filenames
+for file_name in os.listdir(folder_path):
+    if file_name.endswith(".csv"):  # Ensure only CSV files are processed
+        # Extract the numeric part from the filename
+        group_key = "".join([char for char in file_name if char.isdigit()])
+        if group_key not in grouped_files:
+            grouped_files[group_key] = []
+        grouped_files[group_key].append(file_name)
+
+# Filter out groups with more than 2 files (just in case) and limit to specific groups
+desired_groups = ["0", "4", "8", "12", "24", "32"]  # Define the specific groups to include #these are the time intervals of the experiment.
+filtered_groups = {k: grouped_files[k][:2] for k in desired_groups if k in grouped_files}
+
+# Define a function to create histogram plots
+def create_histogram_plots(y_log=False):
+    # Initialize a figure with 2x3 subplots
+    fig, axes = plt.subplots(2, 3, figsize=(40, 40))
+    axes = axes.ravel()  # Flatten the 2x3 grid of subplots
+
+    # Iterate over filtered groups and plot
+    for idx, (group_key, file_list) in enumerate(filtered_groups.items()):
+        if idx >= len(axes):  # Safeguard against index errors
+            print(f"Warning: Group {group_key} exceeds subplot capacity and will not be plotted.")
+            continue
+        
+        ax = axes[idx]  # Get the current subplot
+        colors = ["green", "red"]  # Define colors for the two plots
+        
+        # Print the paired file names for the current group
+        print(f"Group {group_key} paired files: {file_list}")
+
+        # Process each file in the group
+        for file_idx, file_name in enumerate(file_list):
+            file_path = os.path.join(folder_path, file_name)
+            df = pd.read_csv(file_path)
+
+            # Filter "Major Axis Length" values > 1.2
+            filtered_data = df["Major Axis Length"][df["Major Axis Length"] > 1.2]
+            
+            # Debug: Print the length of the filtered data
+            print(f"File: {file_name} | Filtered Length: {len(filtered_data)}")
+
+            # Ensure exactly 2000 data points
+            if len(filtered_data) > 2000:
+                filtered_data = filtered_data.sample(2000, random_state=42)
+                print(f"Sampled down to 2000 data points for {file_name}.")
+            elif len(filtered_data) < 2000:
+                filtered_data = filtered_data.sample(2000, replace=True, random_state=42)
+                print(f"Duplicated to 2000 data points for {file_name}.")
+
+            # Debug: Print max value of filtered data
+            print(f"File: {file_name} | Max Value: {filtered_data.max()}")
+
+            # Plot histogram for the current file
+            ax.hist(
+                filtered_data, 
+                bins=50, 
+                alpha=0.9, 
+                color=colors[file_idx], 
+                label=f"{'Green' if colors[file_idx] == 'green' else 'Red'}", 
+                log=y_log
+            )
+
+        # Set x-axis range and subplot title
+        ax.set_xlim(0, 150)
+        ax.set_ylim(0, 600)
+        ax.set_title(f"Group {group_key}", fontsize=40)
+        ax.tick_params(axis="both", which="major", labelsize=35)
+        ax.set_xlabel("Major Axis Length", fontsize=40)
+        ax.set_ylabel("Count" + (" (Log Scale)" if y_log else ""), fontsize=40)
+        ax.legend(fontsize=30)  # Add legend for green and red plots
+
+    # Remove unused subplots if fewer than 6 groups are plotted
+    for idx in range(len(filtered_groups), 6):
+        fig.delaxes(axes[idx])
+
+    # Adjust layout
+    plt.tight_layout()
+
+    # Debug: Confirm figure is saved
+    save_path = r"Path_to_save_the_plot\plot.pdf"
+    print(f"Saving figure to: {save_path}")
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+# Create the normal scale histogram plot and save it
+create_histogram_plots(y_log=False)  # Generate the normal-scale plot
+
+"""
+END
+
+"""
