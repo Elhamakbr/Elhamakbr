@@ -1,0 +1,748 @@
+"""
+This code includes step by step analysis of videos with .avi format. 
+the videos includes high frames per second, and were taken in brightfied microscopy
+imaging. The field of views are the same size for all the videos with a few which has the higher magnification.
+the pixel size of the camera is 14*14um and the images were taken with 20x and 40X magnification. 
+Most of the images were taken at 20x magnification, and for a few vidoes they were taken at 40X magnification which is 
+especified in folder names. 
+"""
+
+#Libraries
+import cv2
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import distance_transform_edt
+from skimage.feature import peak_local_max
+from skimage.segmentation import watershed
+from skimage import measure
+
+
+
+"""
+step 1: splitting videos into smaller subvideos for faster analysis
+Note: The number of frames in each subvieos should be enough to cover the whole
+motion of a particle throughout the field of view. 
+"""
+# Function to split the video into smaller subvideos with 300 frames each
+def split_video(input_video_path, output_folder, frames_per_subvideo=200):  #Frames_per_vidoes should be set according to the frame rate and the numbe of frames for a single particle
+    # Check if the output directory exists, create it if it doesn't
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # Open the input video
+    video_capture = cv2.VideoCapture(input_video_path)
+    total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = video_capture.get(cv2.CAP_PROP_FPS)
+    width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_size = (width, height)
+    
+    # Calculate the number of subvideos needed
+    num_subvideos = total_frames // frames_per_subvideo
+    remainder_frames = total_frames % frames_per_subvideo
+    
+    # Adjust the number of subvideos to include the remainder in the last subvideo
+    if remainder_frames > 0:
+        num_subvideos += 1
+    
+    print(f"Total frames: {total_frames}")
+    print(f"Splitting into {num_subvideos} subvideos...")
+
+    for subvideo_index in range(num_subvideos):
+        # Define the filename for each subvideo
+        output_filename = os.path.join(output_folder, f"subvideo_{subvideo_index+1}.avi")
+        
+        # Set up the video writer for each subvideo
+        video_writer = cv2.VideoWriter(
+            output_filename, 
+            cv2.VideoWriter_fourcc(*'XVID'), 
+            fps, 
+            frame_size
+        )
+
+        # Set the frame range for this subvideo
+        start_frame = subvideo_index * frames_per_subvideo
+        end_frame = min((subvideo_index + 1) * frames_per_subvideo, total_frames)  # Handle remaining frames
+        
+        print(f"Writing frames {start_frame} to {end_frame - 1} to {output_filename}")
+        
+        # Read and write frames to the subvideo
+        for frame_num in range(start_frame, end_frame):
+            video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = video_capture.read()
+            
+            if not ret:
+                break  # If we fail to read a frame, exit the loop
+            
+            video_writer.write(frame)
+        
+        # Release the writer after writing the subvideo
+        video_writer.release()
+
+    # Release the video capture object
+    video_capture.release()
+    print("All subvideos created and saved.")
+
+# Usage
+input_video_path = r'Path_to_the_input_video'  # Replace with the path to your .avi video
+output_folder = r'Path_to_the_folder_to_save_the_subvideos'  # Folder to save the subvideos
+frames_per_subvideo = 200  # Number of frames per subvideo
+
+split_video(input_video_path, output_folder, frames_per_subvideo)
+
+
+
+"""
+step 2: this step includes reading the subvideos, subtract the average of all frames from each frames in the subvideos 
+this gives an output of a binary image, with moving objects with intensity of one and the rest of the background to zero. 
+the code may gives the particles in the subvidoes white objects with holes inside them. To have a homogenous particle, the 
+function called merge_with_neighbors is used which fills the holes. 
+"""
+def merge_with_neighbors(thresholded_frame, contour):
+    x, y, w, h = cv2.boundingRect(contour)
+    neighborhood = thresholded_frame[max(0, y-50):min(thresholded_frame.shape[0], y + h + 50),
+                                      max(0, x-50):min(thresholded_frame.shape[1], x + w + 50)]
+    print(f"Neighborhood shape: {neighborhood.shape}")
+
+    if np.any(neighborhood == 255):
+        contour_mask = np.zeros_like(thresholded_frame, dtype=np.uint8)
+        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+        kernel = np.ones((30, 30), np.uint8)
+        closed_mask = cv2.morphologyEx(contour_mask, cv2.MORPH_CLOSE, kernel)
+        thresholded_frame[closed_mask == 255] = 255
+
+def process_video(input_path, output_path, threshold_value=10):
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        print(f"Error opening video file: {input_path}")
+        return
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+    frames = []
+    for _ in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+
+    cap.release()
+    if len(frames) == 0:
+        print(f"No frames were read from the video: {input_path}")
+        return
+
+    average_frame = np.mean(frames, axis=0).astype(np.uint8)
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height - 20))
+
+    for i in range(frame_count - 1):
+        diff_frame = cv2.absdiff(frames[i], average_frame)
+        diff_gray = cv2.cvtColor(diff_frame, cv2.COLOR_BGR2GRAY)
+        _, thresholded_frame = cv2.threshold(diff_gray, threshold_value, 255, cv2.THRESH_BINARY)
+
+        contours, _ = cv2.findContours(thresholded_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        print(f"Number of contours detected in frame {i}: {len(contours)}")
+
+        for contour in contours:
+            if cv2.contourArea(contour) > 5:
+                merge_with_neighbors(thresholded_frame, contour)
+
+        output_frame = cv2.normalize(thresholded_frame, None, 0, 255, cv2.NORM_MINMAX)
+        output_frame_cropped = output_frame[0:frame_height - 20, :]
+        out.write(cv2.cvtColor(output_frame_cropped, cv2.COLOR_GRAY2BGR))
+
+    out.release()
+    print(f"Processed video saved as: {output_path}")
+
+def process_all_videos(input_folder, output_folder, threshold_value=10):
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Process all AVI videos in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.avi'):
+            input_path = os.path.join(input_folder, filename)
+            output_path = os.path.join(output_folder, f"processed_{filename}")
+            print(f"Processing {filename}...")
+            process_video(input_path, output_path, threshold_value)
+    print("Processing completed.")
+
+# Example usage
+input_folder = r'Path_to_the_folder_with_subvideos'
+output_folder = r'Path_to_the_folder_to_save_the_subtracted_subvideos'
+process_all_videos(input_folder, output_folder, threshold_value=10) #threshold value should be adjusted accordingly and be sure not so miss any objects. 
+
+
+"""
+step 3: In this step, the subtracted videos are read and elipses are fitted to the detected objects in each frame and the elipse properties including 
+Center X, Center Y, major axis length, minor axis length, circularity, frame number in which the elipses are fitted, and rotatio angle are saved in 
+a .csv file. 
+"""
+def elipse_drawing(frame, frame_number):
+    # Convert frame to grayscale if it's not already
+    gray_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+
+    # Apply Gaussian blur to reduce noise
+    blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
+
+    # Apply a binary threshold to the blurred image
+    _, thresholded_image = cv2.threshold(blurred_image, 128, 255, cv2.THRESH_BINARY) #Since the vidoes are binaries, this value would work.
+
+    # Ensure the thresholded image is in the correct format (CV_8UC1)
+    thresholded_image = thresholded_image.astype(np.uint8)
+
+    # Find contours in the preprocessed image using cv2.RETR_CCOMP
+    contours, _ = cv2.findContours(thresholded_image, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Filter out only the external contours based on area
+    external_contours = [cnt for cnt in contours if 100000 > cv2.contourArea(cnt) > 3] #setup the values accordingly
+
+    # Prepare lists to store ellipse properties
+    centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas = [], [], [], [], [], []
+
+    # Fit ellipses to the external contours and calculate properties
+    ellipses = []
+    for contour in external_contours:
+        if len(contour) >= 5:  # FitEllipse requires at least 5 points
+            ellipse = cv2.fitEllipse(contour)
+            width, height = ellipse[1]  # Major and minor axis lengths
+
+            # Check if the fitted ellipse has valid dimensions
+            if width > 0 and height > 0:
+                ellipses.append(ellipse)
+
+                # Calculate the center of mass
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                    centers.append((cX, cY))
+
+                # Store ellipse properties
+                major_axis_lengths.append(height)
+                minor_axis_lengths.append(width)
+                
+                # Calculate and store ellipse area
+                area = np.pi * (width / 2) * (height / 2) #width and height are equal to major and minor axis of the elipse. 
+                areas.append(area)
+                
+                # Calculate circularity
+                contour_area = cv2.contourArea(contour)
+                circularity = (4 * contour_area) / (np.pi * (height ** 2))
+                circularities.append(circularity)
+                
+                # Modify rotation angle if circularity > 0.92
+                rotation_angle = ellipse[2]
+                if circularity > 0.89:
+                    rotation_angle = 0
+                rotation_angles.append(rotation_angle)
+
+    # Draw ellipses on the frame
+    for ellipse in ellipses:
+        cv2.ellipse(frame, ellipse, (255), thickness=2)
+
+    return frame, centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas
+
+def process_video(input_video_path, output_folder, csv_writer):
+    # Initialize video reader and writer as before
+    video_cap = cv2.VideoCapture(input_video_path)
+    frame_width = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = video_cap.get(cv2.CAP_PROP_FPS)
+
+    # Define unique output video path for each input video
+    video_name = os.path.splitext(os.path.basename(input_video_path))[0]
+    output_video_path = os.path.join(output_folder, f'{video_name}_processed_with_ellipses.avi')
+    os.makedirs(output_folder, exist_ok=True)
+    video_writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'XVID'), fps, (frame_width, frame_height))
+
+    frame_number = 0
+    while video_cap.isOpened():
+        ret, frame = video_cap.read()
+        if not ret:
+            break
+
+        # Process the frame to draw ellipses and extract properties
+        processed_frame, centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas = elipse_drawing(frame, frame_number)
+
+        # Save the processed frame to the output video
+        video_writer.write(processed_frame)
+
+        # Append ellipse properties to the CSV writer
+        for center, rotation_angle, major_axis, minor_axis, circularity, area in zip(
+                centers, rotation_angles, major_axis_lengths, minor_axis_lengths, circularities, areas):
+            csv_writer.writerow({
+                'Video Name': video_name,
+                'Frame Number': frame_number,
+                'Center X': center[0],
+                'Center Y': center[1],
+                'Rotation Angle': rotation_angle,
+                'Major Axis Length': major_axis,
+                'Minor Axis Length': minor_axis,
+                'Circularity': circularity,
+                'Area': area
+            })
+
+        frame_number += 1
+
+    # Release resources
+    video_cap.release()
+    video_writer.release()
+    print(f"Processing completed for {input_video_path}")
+
+
+def batch_process_videos(input_folder, output_folder):
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Define the path for the combined CSV file
+    csv_output_path = os.path.join(output_folder, 'combined_ellipse_analysis_results.csv')
+    
+    # Open the CSV file once and write header only once
+    with open(csv_output_path, mode='w', newline='') as csv_file:
+        # Define fieldnames for the CSV
+        fieldnames = ['Video Name', 'Frame Number', 'Center X', 'Center Y', 'Rotation Angle', 
+                      'Major Axis Length', 'Minor Axis Length', 'Circularity', 'Area']
+        
+        # Initialize the CSV writer with fieldnames
+        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        csv_writer.writeheader()
+        
+        # Loop through each video file in the input folder
+        for filename in os.listdir(input_folder):
+            if filename.endswith('.avi'):
+                input_video_path = os.path.join(input_folder, filename)
+                # Process each video and write data to the same CSV
+                process_video(input_video_path, output_folder, csv_writer)
+
+    print(f"Batch processing completed. Results saved to {csv_output_path}")
+
+
+# Example usage
+input_folder = r'Path_to_the_folder_with_subtracted_subvideos'  # Change to your input folder path
+output_folder = r'Path_to_the_folder_to_save_the_elipse_drawn_videos_and_the_csv_files'  # Change to your output folder path
+batch_process_videos(input_folder, output_folder)
+
+
+"""
+step 4: From this step the extracted data are plotted in different way. This step includes plotting Y-positon of the particles' center against their
+X-position and/or the particles' rotation angle against the X-position. 
+"""
+def plot_rotation_position(csv_file_path):
+    # Load the combined CSV file into a DataFrame
+    results_df = pd.read_csv(csv_file_path)
+    
+    plt.figure(figsize=(48, 16))
+    
+    # Group by 'Video Name' and plot each group separately. video name is the number of frame in which the object is detected
+    grouped = results_df.groupby('Video Name')
+    
+    # Initialize a counter to limit the number of groups plotted
+   # max_groups = 8
+   # group_count = 0
+    
+    #for name, group in grouped:
+        # Check if we have reached the limit of groups to plot
+   #     if group_count >= max_groups:
+    #        break
+    
+    for name, group in grouped:
+        # Ensure the data is sorted by frame number for each video
+        group = group.sort_values(by='Frame Number')
+
+        # Iterate through each center in the group
+        for i, center in group.iterrows():
+            # Apply the condition to find centers close in X, Y, and similar in major axis length (within 3)
+            close_centers = group[
+                (abs(group['Center Y'] - center['Center Y']) < 10) &  # Y center close
+                (abs(group['Major Axis Length'] - center['Major Axis Length']) < 10) &  # Major axis similar
+                (group['Major Axis Length'] > 15) &  # Major axis within a range
+                (group['Major Axis Length'] < 100)  # Major axis within a range
+            ]
+            
+            # Only plot if there are close centers that satisfy the condition
+            # Only plot if there are at least 3 close centers that satisfy the condition
+            if len(close_centers) >= 3:             
+                # Prepare the data for plotting
+                x_values = close_centers['Center X']  # Can apply X scaling
+                rotation_angles = close_centers['Rotation Angle']  # Get the rotation angles. It should be substituted by Center Y for position plot. 
+                
+                # Check range of x_values to avoid excessive plot size
+                #x_values = x_values.clip(lower=0, upper=300)  # Limit x values to a range (example)
+                
+                # Plot the rotation angle as a function of center X
+                plt.scatter(x_values, rotation_angles, marker='o', label=name, color='blue', s=500)  # Different colors for each video
+       
+      #  group_count += 1  # Increment the counter for each plotted group
+                
+    # Add labels, title, and legend
+    plt.xlabel('X-position(µm)', fontsize=60)
+    plt.ylabel('Rotation Angle)', fontsize=60)
+   # plt.title('Rotation Angle vs Center X (Filtered by Close Centers and Major Axis Length)')
+   # plt.legend(loc='upper right', fontsize=30)  # Add a legend to differentiate each group
+   # plt.xlim([0, 0.16])  # Limit the X-axis range
+   # plt.ylim([0, 200])
+    plt.xticks(fontsize=50)
+    plt.yticks(fontsize=50)
+    plt.savefig('Plot.png')  # Save the plot as a PDF
+    plt.show()
+
+# Usage
+csv_file_path = r'Path_to_the_csv_file_containing_data_from_elipse_analysis.csv'
+plot_rotation_position(csv_file_path)
+
+
+
+"""
+step 5: Applying fast fourier transform (FFT) to the rotation angle and position data. 
+Existence of any periodic behaviour should be shown as peaks in FFT plots. Since the data are changed over
+position spatial FFT is used to see the frequency behaviour over position. Also, since the size of data
+corresponds to each particles are not the same are not equal, non-uniform FFT with linear interpolation is used. 
+different interploation like spline were tested too for the current data, and the linear found to be the best fit. 
+"""
+
+#Libraries
+from scipy.interpolate import interp1d
+from scipy.interpolate import UnivariateSpline
+
+#non-unifrom FFT
+def plot_spatial_nufft(csv_file_path, output_csv_path):
+    # Load the combined CSV file into a DataFrame
+    results_df = pd.read_csv(csv_file_path)
+    
+    # Create a figure for the final plot
+    plt.figure(figsize=(48, 16))
+    
+    # Group by 'Video Name' to process each group separately
+    grouped = results_df.groupby('Video Name')
+    
+    # Dictionary to store FFT magnitudes with group names
+    fft_data = {'Group': []}  # 'Group' column will store video names
+    magnitude_list = []  # List to hold each group's magnitude array
+
+    # Variable to keep track of the maximum number of frequencies
+    max_length = 0
+
+    # Loop through each video group
+    for name, group in grouped:
+        # Ensure the data is sorted by spatial dimensions for consistency
+        group = group.sort_values(by='Center X')
+
+        # Filter the data based on specified conditions for the group
+        filtered_group = group[
+            (abs(group['Center Y'] - group['Center Y'].mean()) < 10) & 
+            (abs(group['Major Axis Length'] - group['Major Axis Length'].mean()) < 15) & 
+            (group['Major Axis Length'] > 5) & 
+            (group['Major Axis Length'] < 100)
+        ]
+
+        # Proceed only if there are more than 3 members in the group
+        if len(filtered_group) >= 3:
+            # Prepare the data for NUFFT (use 'Rotation Angle' as a function of spatial positions)
+            rotation_angles = filtered_group['Center Y']
+            spatial_positions = filtered_group['Center X']  # Non-uniform spatial variable #Rotation Angle should be substituted for analysis of periodic behaviour of roation. 
+
+            # Remove the mean to focus on variations
+            rotation_angles = rotation_angles - np.mean(rotation_angles)
+
+            # Define a uniform grid for resampling
+            uniform_positions = np.linspace(spatial_positions.min(), spatial_positions.max(), len(spatial_positions))
+
+            # Interpolate the non-uniform data onto the uniform grid
+            interpolator = interp1d(spatial_positions, rotation_angles, kind='linear', fill_value="extrapolate")
+            uniform_rotation_angles = interpolator(uniform_positions)
+
+            # Estimate spatial resolution
+            spatial_resolution = np.mean(np.diff(uniform_positions))
+
+            # Perform the FFT transformation on the resampled data
+            rotation_angles_fft = np.fft.fft(uniform_rotation_angles)
+            
+            # Compute the spatial frequencies corresponding to the FFT result
+            n = len(uniform_rotation_angles)
+            freqs = np.fft.fftfreq(n, d=spatial_resolution)
+            
+            # Get the magnitude of the FFT (only positive frequencies)
+            magnitude = np.abs(rotation_angles_fft)[:n//2]
+
+            # Update max_length if this group has more data points
+            max_length = max(max_length, len(magnitude))
+
+            # Store the group name and corresponding magnitude array
+            fft_data['Group'].append(name)
+            magnitude_list.append(magnitude)
+
+            # Plot the FFT magnitude for this group
+            plt.plot(freqs[:n//2], magnitude, label=name, color='blue')
+
+    # Add labels, title, and legend to the plot
+    plt.xlabel('Spatial Frequency', fontsize=60)
+    plt.ylabel('Magnitude', fontsize=60)
+    plt.xticks(fontsize=50)
+    plt.yticks(fontsize=50)
+    plt.xlim([0, max(freqs[:n//2])])  # Limit X-axis to positive frequencies
+    plt.savefig('nufft_non_displaced_peanut_linear_position_40X_001.png')
+    plt.show()
+
+    # Generate the full frequency values array based on max_length
+    frequency_values = np.fft.fftfreq(max_length * 2, d=spatial_resolution)[:max_length]
+
+    # Convert the list of magnitudes to a DataFrame
+    magnitude_list_padded = [np.pad(m, (0, max_length - len(m)), 'constant', constant_values=np.nan) for m in magnitude_list]
+
+    # Create DataFrame with the padded lists and add frequency values as columns
+    fft_df = pd.DataFrame(magnitude_list_padded)
+    fft_df.insert(0, 'Group', fft_data['Group'])  # Add the group names as the first column
+    fft_df.columns = ['Group'] + list(frequency_values)  # Add the frequency values as column headers
+
+    # Save the DataFrame as a CSV file
+    fft_df.to_csv(output_csv_path, index=False)
+
+# Call the function with the CSV file path and the output path for NUFFT data
+csv_file_path = r'Path_to_the_csv_file_containing_elipse_analysis_data.csv'
+output_csv_path = r'Path_to_a_csv_file_to_save_the_FFT_data.csv'
+
+plot_spatial_nufft(csv_file_path, output_csv_path)
+
+
+#Mean plot: Get the mean value of the FFT data for all particles and plot the new mean instead of plotting each in separate graph.
+
+def plot_average_fft(csv_file_path, window_size=3, step_size=50):
+    # Load the CSV file into a DataFrame
+    fft_df = pd.read_csv(csv_file_path)
+    
+    
+    # Extract the frequency values from the CSV header (excluding 'Group' column)
+    frequency_values = fft_df.columns[1:].astype(float)  # Assuming headers are numeric frequencies
+    
+    # Exclude the 'Group' column for averaging
+    fft_values = fft_df.drop(columns=['Group'])
+    
+    # Calculate the mean for each frequency (column)
+    column_averages = fft_values.mean()
+    
+    # Apply a moving average smoothing to the averaged values
+    smoothed_averages = column_averages.rolling(window=window_size, center=True).mean()
+    
+    # Plot the smoothed averages against the frequency values
+    plt.figure(figsize=(48, 16))
+    plt.plot(frequency_values, smoothed_averages, marker='o', linestyle='-', color='black', label='Smoothed Average', linewidth=8)
+    
+    # Add labels and title
+    plt.xlabel('Frequency', fontsize=60)
+    plt.ylabel('Magnitude', fontsize=60)
+    
+    # Customize x-ticks and y-ticks
+    tick_positions = range(0, len(frequency_values), step_size)
+    plt.xticks(frequency_values[tick_positions], fontsize=50)
+    plt.yticks(fontsize=50)
+    
+    # Save the plot as a PDF
+    plt.savefig('FFT_plot.png')
+    plt.show()
+
+# Call the function with the path to the CSV file and a smoothing window size
+csv_file_path =r'Path_to_the_csv_file_containing_ FFT_data.csv'
+plot_average_fft(csv_file_path, window_size=3, step_size=50)
+
+
+
+"""
+Step 6: Plotting data in form of heatmaps and scatter/histogram. 
+"""
+#Heat map function
+
+#library
+import seaborn as sns
+
+def plot_circularity_vs_rotation(csv_file_path, output_image_path='Heat_map.png'):
+    """
+    Reads a CSV file, filters data based on the Major Axis condition, and plots a heatmap of Circularity vs. Rotation Angle.
+
+    Parameters:
+        csv_file_path (str): Path to the CSV file to read.
+        output_image_path (str): Path to save the output heatmap image.
+
+    Returns:
+        None
+    """
+    # Load the CSV file into a DataFrame
+    data = pd.read_csv(csv_file_path)
+
+    # Apply the condition: 'Major Axis' > 5 and < 100
+    filtered_data = data[(data['Major Axis Length'] > 20) & (data['Major Axis Length'] < 100) & (data['Minor Axis Length'] > 15)]
+
+    # Extract Circularity and Rotation Angle columns
+    circularity = filtered_data['Circularity']
+    rotation_angle = filtered_data['Rotation Angle']
+    
+    # Check for any negative rotation angles and print a warning
+    if (filtered_data['Rotation Angle'] < 0).any():
+        print("Warning: There are negative values in the 'Rotation Angle' column.")
+
+    # Create a 2D histogram (heatmap) for density visualization
+    plt.figure(figsize=(32, 24))
+    heatmap = sns.kdeplot(
+        x=circularity,
+        y=rotation_angle,
+        cmap="viridis",
+        fill=True,
+        thresh=0,
+        levels=100,
+        bw_adjust=1 # Increase the bandwidth to smooth the density
+    )
+    
+    # Add colorbar
+    cbar = plt.colorbar(heatmap.collections[-1], ax=plt.gca())
+    cbar.ax.tick_params(labelsize=65)  # Set the font size of the colorbar
+
+
+    # Add labels, title, and customize ticks
+    plt.xlabel('Circularity', fontsize=75)
+    plt.ylabel('Orientation Angle', fontsize=75)
+    plt.xticks(fontsize=65)
+    plt.yticks(fontsize=65)
+
+    # Save the plot as an image
+    plt.savefig(output_image_path, bbox_inches='tight')
+    # Show the plot
+    plt.show()
+
+# Example usage:
+plot_circularity_vs_rotation(
+    r'Path_to_the_csv_files_containing_elipse_data.csv',
+    r'Path_to_save_the_heatmap_image'
+)
+
+
+def plot_circularity_vs_rotation_hist(csv_file_path, output_image_path='2D_Histogram.png'):
+    """
+    Reads a CSV file, filters data based on the Major Axis condition, and plots a joint plot of Circularity vs. Rotation Angle
+    with histograms on the sides.
+
+    Parameters:
+        csv_file_path (str): Path to the CSV file to read.
+        output_image_path (str): Path to save the output joint plot image.
+
+    Returns:
+        None
+    """
+    # Load the CSV file into a DataFrame
+    data = pd.read_csv(csv_file_path)
+
+    # Apply the condition: 'Major Axis' > 5 and < 100
+    filtered_data = data[(data['Major Axis Length'] > 20) & (data['Major Axis Length'] < 100) & (data['Minor Axis Length'] > 15)]
+
+    # Extract Circularity and Rotation Angle columns
+    circularity = filtered_data['Circularity']
+    rotation_angle = filtered_data['Rotation Angle']
+    
+    # Check for any negative rotation angles and print a warning
+    if (filtered_data['Rotation Angle'] < 0).any():
+        print("Warning: There are negative values in the 'Rotation Angle' column.")
+    
+    # Create a joint plot with scatter plot and histograms
+    g = sns.jointplot(
+        x=circularity,
+        y=rotation_angle,
+        kind="scatter",  # Scatter plot in the center
+        color="orange",    # Color of the scatter points
+        marginal_kws=dict(bins=50, fill=True),  # Histograms on the margins
+        s=500 
+    )
+    
+    # Set figure size (as requested)
+    g.fig.set_size_inches(32, 32)
+    
+    # Set axis labels and title
+    g.set_axis_labels('Circularity', 'Orientation Angle', fontsize=75)
+    g.ax_joint.set_xlim(0, 1)
+    #g.fig.suptitle('Circularity vs Rotation Angle', fontsize=75)
+    
+    # Adjust title position
+    g.fig.tight_layout()
+    g.fig.subplots_adjust(top=0.95)  # Adjust title to avoid overlap
+    
+    # Customize ticks (as requested)
+    g.ax_joint.tick_params(axis='x', labelsize=65)
+    g.ax_joint.tick_params(axis='y', labelsize=65)
+    g.ax_marg_x.tick_params(labelsize=65)
+    g.ax_marg_y.tick_params(labelsize=65)
+    
+    # Save the plot as an image
+    # Save the plot as an image
+    plt.savefig(output_image_path, bbox_inches='tight')
+    
+    # Show the plot
+    plt.show()
+
+# Example usage:
+plot_circularity_vs_rotation_hist(
+    r'Path_to_the_csv_files_containing_elipse_data.csv',
+    r'Path_to_the_scatter_histogram_plot.png'
+)
+
+#this function normalize the data of the positions into a unit cells. The unit cell is 95um wide and 140um high. 
+#library
+from matplotlib import cm
+from matplotlib.colors import Normalize
+
+# Load the CSV file into a DataFrame
+data = pd.read_csv(r'Path_to_th_csv_file_containing_elipse_data.csv')
+
+# Apply the condition: 'Major Axis' > 5 and < 100
+filtered_data = data[(data['Major Axis Length'] > 6) & (data['Major Axis Length'] < 100)]
+
+# Extract Circularity and Rotation Angle columns
+Center_X = filtered_data['Center X'] * 0.325
+Center_Y = filtered_data['Center Y'] * 0.325
+
+# Define the period of the frequency behavior (for example, 2*pi for the sine wave)
+period = 95
+
+# Define the starting coordinate of the unit cell (e.g., offset by pi/2)
+start_point = 210  # This will shift the unit cell to start at x = pi/2
+
+# Normalize the data to fit within one period (unit cell)
+x_normalized = np.mod(Center_X - start_point, period)
+
+# Create a 2D KDE plot (heatmap) for density visualization
+plt.figure(figsize=(32, 24), dpi=300)
+
+# Create the KDE plot
+kde = sns.kdeplot(
+    x=x_normalized,
+    y=Center_Y,
+    cmap="viridis",  # Color map
+    fill=True,        # Fill the density regions
+    thresh=0,         # Threshold for drawing contours (0 means no threshold)
+    levels=100,       # Number of contour levels
+    bw_adjust=1     # Bandwidth adjustment for smoothing (higher = smoother)
+)
+
+# Add the colorbar manually
+# Get the current color map and normalize the values based on the plot data
+sm = plt.cm.ScalarMappable(cmap="viridis", norm=Normalize(vmin=0, vmax=1))  # Adjust vmax as per your data
+sm.set_array([])  # Empty array since we are directly mapping
+
+# Get the current axis for the plot
+cbar = plt.colorbar(sm, ax=plt.gca())
+cbar.set_label('Density', fontsize=65)
+cbar.ax.tick_params(labelsize=65)
+
+# Customize the plot
+plt.xlabel("Unit X cell (µm)", fontsize=80)
+plt.ylabel("Unit Y cell (µm)", fontsize=80)
+plt.xlim(0, period)
+plt.ylim(115, 260)  # Set y-axis limit as desired
+plt.grid(False)
+plt.xticks(fontsize=65)
+plt.yticks(fontsize=65)
+
+# Show the plot
+plt.savefig(r'Path_to_save_the_heat_map_of_the_position.png')
+
