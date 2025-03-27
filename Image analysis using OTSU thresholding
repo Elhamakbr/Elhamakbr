@@ -1,0 +1,182 @@
+"""
+This is the code used for processing of flourescent images used for the analysis of data from the project focused on sorting group A Streptococcus clusters
+using DLD device. The code analyze ".tif" file images taken from the sample inlet and sample outlets. 
+The objects within images are segemted and their properties are measured to assess the separation result. 
+The code use OTSU threhsoding for segemtationa and object detection and Regionprops for data extraction with three important variables 
+including objects major axis length, area and circualrity.
+The code also include plotting images at different steps of processing to assess the applicability of the pipeline for our dataset.
+"""
+
+
+from __future__ import print_function
+from scipy import ndimage
+import cv2
+import numpy as np
+import glob
+import matplotlib.pyplot as plt
+import skimage.color
+import skimage.filters
+import pandas as pd
+from skimage import color, measure
+
+
+def pipline_otsu(images):
+    img = skimage.io.imread(images, as_gray=True)
+
+    # Convert to grayscale using skimage
+    gray_img = skimage.color.rgb2gray(img)
+    gray_img = skimage.util.img_as_float(gray_img)
+
+    # Convert the grayscale image to color (3 channels)
+    #img_color = cv2.cvtColor((gray_img * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+    blurred_img = skimage.filters.gaussian(gray_img, sigma=0)
+    
+    
+    #Get the histogram of the signal intesnities (for the need of any extra manual thresholding, extra step)
+    histogram, bin_edges = np.histogram(blurred_img, bins=256, range=(0, 1))
+    
+    plt.plot(bin_edges[0:-1], histogram)
+    plt.title("Grayscale Histogram")
+    plt.xlabel("grayscale value")
+    plt.ylabel("pixels")
+    plt.xlim(0, 1.0)
+    
+    #Get the pixel intesnity values of the whole image
+    # Choose a row (e.g., middle of the image)
+    row = blurred_img.shape[0] // 2
+    gray_values = blurred_img[row, :]  # Extract pixel intensities along this row
+    
+    # Define distance (x-axis as pixel positions)
+    distance = np.arange(len(gray_values))
+    
+    # Plot gray values vs. distance
+    plt.figure(figsize=(8, 5))
+    plt.plot(distance, gray_values, color='black')
+    plt.xlabel("Distance (pixels)")
+    plt.ylabel("Gray Value (Intensity)")
+    plt.title("Gray Value Profile Along a Line")
+    plt.show()
+    
+    
+    #get the SNR
+    # Compute mean (signal) and standard deviation (noise estimate)
+    signal = np.mean(blurred_img)
+    noise = np.std(blurred_img)
+    
+    # Compute SNR
+    snr = signal / noise
+    
+    print(f"SNR: {snr:.2f}")
+
+    # Use OTSU thresholding
+    _, binary_mask = cv2.threshold((blurred_img * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+
+    # Convert binary masks to the required data type and scale if needed. You can skip it if the data type requirement is satisfied
+   # binary_mask_float = binary_mask.astype(float) / 255.0
+    #binary_mask = binary_mask.astype(float)
+    # Invert the binary mask
+    #binary_mask = np.invert(binary_mask)
+
+    #color labelling
+    s = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
+    labeled_mask_final, num_labels = ndimage.label(binary_mask, structure=s)
+    imgcolor = color.label2rgb(labeled_mask_final, bg_label=0)
+    
+    # Display the results
+    fig, ax = plt.subplots(1, 3, figsize=(10, 8))
+
+    # Display OTSU thresholding result and the input image
+    ax[0].imshow(imgcolor, cmap='gray')
+    ax[0].set_title("color-labelled image")
+    ax[1].imshow(binary_mask, cmap='gray')
+    ax[1].set_title("OTSU Thresholded binary image")
+
+
+    props = measure.regionprops(labeled_mask_final)
+    props = measure.regionprops_table(labeled_mask_final, properties=('area',
+                                                     'major_axis_length',
+                                                     'minor_axis_length'))
+
+    # Display pixel values and data type information
+    print("Original Image - Pixel values: ", gray_img.min(), gray_img.max())
+    print("OTSU Thresholding Result - Pixel values: ", binary_mask.min(), binary_mask.max(), "Data Type: ", binary_mask.dtype)
+   # print("Binary_mask_float - Pixel values: ", binary_mask_float.min(), binary_mask_float.max(), "Data Type: ", binary_mask_float.dtype)
+
+    return imgcolor, props
+
+
+
+# Batch processing
+def process_images_otsu(input_dir):
+    """
+    Process all images in a directory using image tiling.
+
+    Args:
+        input_dir (str): Path to the directory containing the images.
+
+    Returns:
+        all_imgcolor: List of processed images.
+        all_props: List of region properties for each processed image.
+    """
+    filelist = glob.glob(input_dir + '/*.tiff') #change it to the right image format
+    
+
+    all_props = []
+    all_imgcolor = []
+    success_counter = 0
+    
+    for filename in filelist:
+        # Exception handling so the program can move on if one image fails for some reason.
+        try:
+           imgc, props = pipline_otsu(filename)
+           all_props.append(props)
+           all_imgcolor.append(imgc)
+           success_counter += 1
+            
+            # Update the success counter       
+        except Exception:
+            from warnings import warn
+            warn("There was an exception in " + filename + "!!!")
+     
+    # How many images were successfully analyzed?
+    print ("Successfully analyzed", success_counter, "of", len(filelist), "images")
+    
+    return all_imgcolor, all_props
+
+
+all_imgcolor, all_prop = process_images_otsu(input_dir=r'folder_path')
+
+all_properties = pd.concat([pd.DataFrame(props) for props in all_prop], ignore_index=True)
+
+
+#a supervised, intermediate step where the range of major axis length and the shape of intesnity profile plots are checked to be sure that OTSU thresholding is appropriate for the barch data
+
+pixel_size_um=0.325 #change it with the proper value
+
+# Replace zeros with NaN and drop rows containing NaN
+all_properties = all_properties.replace(0, pd.NA).dropna()
+
+# Calculating circularity
+all_properties['circularity'] = 4 * all_properties['area'] / \
+                             (all_properties['major_axis_length'] + 
+                              all_properties['minor_axis_length'])**2
+
+all_properties['circularity']=all_properties['circularity']*(4/np.pi)
+
+#change scale to um. Use the right pixel size
+all_properties['area']=all_properties['area']*pixel_size_um*pixel_size_um
+all_properties['major_axis_length']=all_properties['major_axis_length']*pixel_size_um
+all_properties['minor_axis_length']=all_properties['minor_axis_length']*pixel_size_um
+all_properties
+
+#data filtering if needed
+all_properties = all_properties.loc[all_properties['circularity'] >= 0.8]
+all_properties = all_properties.loc[all_properties['major_axis_length']>=4]
+all_properties = all_properties.loc[all_properties['major_axis_length']<=100]
+all_properties = all_properties.loc[all_properties['minor_axis_length']>=3]
+all_properties = all_properties.loc[all_properties['area'] <= 2500]
+
+#save pandas data into exel (.csv) file
+all_properties.to_csv('file_name.csv', index=False)
