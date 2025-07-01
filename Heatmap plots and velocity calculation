@@ -1,0 +1,309 @@
+#Detecting period using FFT
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.fft import fft, fftfreq
+from scipy.signal import detrend
+
+# ————————————————————————————
+# 1) Read & filter
+df = pd.read_csv(
+    r'Path_to_csv_file_containing_deteted_objecs properties'
+)
+df = df[df['Video Name'].str.contains('displaced', case=False, na=False)]
+#df = df[df['Video Name'].str.contains('2nd_two_rows', case=False, na=False)]
+df = df[(df['Center X'] > 0) & (df['Center Y'] > 0)]   #Extra line in case specific rows of data are needed
+
+# 2) Scale
+x = df['Center X'].values *0.35  #Change the number depending on camera pixel sizes and magnifcation
+#y = df['Center Y'].values *0.35  #Change the number depending on camera pixel sizes and magnifcation  #uncomment the Center Y if the the heatmpa is position heatmap.
+y=df['Rotation Angle'].values      #uncomment rotation angle if the heatmap is rotation plot
+#y=df['Circularity'].values        #Used for bacteria changes in circularity
+
+# 3) Estimate X‑period via FFT
+hist_x, x_edges = np.histogram(x, bins=200)  #Was 500 for non-spherical beads
+fft_x = np.abs(fft(hist_x))
+freqs_x = fftfreq(len(hist_x), d=(x_edges[1] - x_edges[0]))
+pos = freqs_x > 0
+period_x = 1.0 / freqs_x[pos][np.argmax(fft_x[pos])]
+print(f"Estimated X period: {period_x:.2f} µm")
+
+# 4) Compute each point’s period index, then “previous” index
+period_idx      = np.floor(x / period_x).astype(int)
+period_idx_prev = np.clip(period_idx - 1, 0, None)
+
+# 5) Define your per‑period Y‑shift (measure this from your stripes)
+shift_per_period = 1.0   # µm
+
+# 6) Remove that previous‑period shift, then wrap both X & Y
+y_adjusted  = y - period_idx_prev * shift_per_period
+x_wrapped   = np.mod(x, period_x)
+y_wrapped   = np.mod(y_adjusted, period_x)
+
+# ————————————————————————————
+# 7) Now plot one subplot per original period cell
+unique_cells = np.unique(period_idx)
+n_cells = unique_cells.size
+if n_cells == 0:
+    print("No period‑cells found; nothing to plot.")
+else:
+    ncols = min(4, n_cells)
+    nrows = int(np.ceil(n_cells / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 4*nrows), sharex=True, sharey=True)
+    
+    for ax, cell in zip(axes.flat, unique_cells):
+        mask = period_idx == cell
+        ax.scatter(x_wrapped[mask], y_wrapped[mask], s=10, alpha=0.7)
+        ax.set_title(f"Cell #{cell}", fontsize=12)
+        ax.set_xlim(0, period_x)
+        ax.set_ylim(0, period_x)
+        ax.grid(True)
+    
+    # turn off any unused axes
+    for ax in axes.flat[n_cells:]:
+        ax.set_visible(False)
+    
+    fig.suptitle("Wrapped points by original period cell", fontsize=16)
+    fig.tight_layout(rect=[0,0,1,0.95])
+    plt.show()
+
+# … after loading & filtering df, and scaling …
+x = df['Center X'].values * 0.35
+#y = df['Center Y'].values * 0.35
+y=df['Rotation Angle'].values
+#y=df['Circularity'].values
+
+# ➀ compute period_x as before
+hist_x, edges = np.histogram(x, bins=200)
+fft_x = np.abs(fft(hist_x))
+freqs = fftfreq(len(hist_x), d=(edges[1]-edges[0]))
+pos = freqs>0
+period_x = 1/ freqs[pos][np.argmax(fft_x[pos])]
+
+# ➁ assign each point to a cell
+period_idx = np.floor(x/period_x).astype(int)
+
+# ➂ compute mean‑Y in each cell
+cell_ids    = np.unique(period_idx)
+cell_means  = np.array([ y[period_idx==i].mean() for i in cell_ids ])
+
+# ➃ compute shifts between successive cells  
+shifts = np.diff(cell_means)       # length = len(cell_ids)-1
+print("measured shifts from cell i→i+1:", shifts)
+
+# ➄ average shift (optional)
+shift_per_period = shifts.mean()
+print(f"average shift per period = {shift_per_period:.3f} µm")
+
+
+# ➅ compute “previous” cell index
+period_idx_prev = np.clip(period_idx - 1, 0, None)
+
+# ➆ level Y by subtracting that measured shift
+y_adjusted = y - period_idx_prev * shift_per_period
+
+# ➇ wrap into [0,period_x)
+x_wrapped = np.mod(x, period_x)
+y_wrapped = np.mod(y_adjusted, 180) #, period_x  Use period_x if the heatmap is position plot, or 180 if the heatmap is rotation angle
+
+# ➈ plot the scatter plot to check the period detection is correct
+plt.figure(figsize=(6,6))
+plt.scatter(x_wrapped, y_wrapped, s=10, alpha=0.7)
+plt.xlabel(f"X mod {period_x:.1f}")
+plt.ylabel(f"Y adjusted mod {period_x:.1f}")
+#plt.ylim(0,period_x)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+# Step 8: Heatmap for data collapsed into one X-period unit cell (Y collapsed using X periodicity), position heatmap plot
+heatmap_bins = 40  # Adjust for desired resolution
+heatmap, xedges, yedges = np.histogram2d(x_wrapped, y_wrapped, bins=heatmap_bins, range=[[0, period_x], [0, period_x]])  
+
+
+plt.figure(figsize=(30, 30))
+im = plt.imshow(
+    heatmap.T,
+    origin='lower',
+    extent=[0, period_x, 0, period_x],
+    aspect='auto',
+    cmap='hot',
+    vmin=0,
+    vmax=np.percentile(heatmap, 99)
+)
+
+# Set colorbar and styling
+cbar = plt.colorbar(im, label='Density')
+cbar.ax.yaxis.label.set_size(50)
+cbar.ax.tick_params(labelsize=45)
+
+# Axis labels and ticks
+plt.xlabel("Unit cell (26 µm)", fontsize=50)
+plt.ylabel("Unit cell (26 µm)", fontsize=50)
+plt.tick_params(axis='both', which='major', labelsize=45)
+
+# Apply y-limits **after** imshow
+plt.ylim(0, period_x)
+
+# Square aspect and grid
+plt.grid(True)
+plt.gca().set_aspect('equal', adjustable='box')
+
+# Finally apply layout
+plt.tight_layout()
+plt.savefig(r'Path_to_save_the_plot')
+
+
+#Rotation Angle
+# Step 8-1: Heatmap for data collapsed into one X-period unit cell (Y collapsed using X periodicity), position heatmap plot
+heatmap_bins = 40  # Adjust for desired resolution
+heatmap, xedges, yedges = np.histogram2d(x_wrapped, y_wrapped, bins=heatmap_bins, range=[[0, period_x], [0, 180]])  
+
+plt.figure(figsize=(30, 30))
+im =plt.imshow(
+    heatmap.T,
+    origin='lower',
+    extent=[0, period_x, 0, 180],
+    aspect='auto',
+    cmap='hot',
+    vmin=0,
+    vmax=np.percentile(heatmap, 99)  # ignore extreme max outliers
+)
+# capture the Colorbar object  
+cbar = plt.colorbar(im, label='Desnity')  
+# set its main label font size  
+cbar.ax.yaxis.label.set_size(50)  
+# set its tick‐label sizes  
+cbar.ax.tick_params(labelsize=45)  
+
+plt.xlabel("Unit cell (26 µm)", fontsize=50)
+plt.ylabel("Rotation Angle (degree)", fontsize=50)
+plt.grid(True)
+
+# set tick label size on the main axes
+plt.tick_params(axis='both', which='major', labelsize=45)
+
+# force square aspect
+#plt.gca().set_aspect('equal', adjustable='box')
+
+plt.tight_layout()
+plt.savefig(r'Path_to_save_the_plot')
+
+
+
+
+
+#Velocity plot based on automated_period_detection by FFT. The code plot the x,y position of the detected objects and calculate their velocity and shows velocity values as colobar range. 
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.fft import fft, fftfreq
+
+# 1) ── Read & filter your data ─────────────────────────────────────────────────
+df = pd.read_csv(
+    r'Path_to_csv_file_containing_deteted_objecs properties'
+)
+df = df[df['Video Name'].str.contains('spherical', case=False, na=False)]
+df = df[(df['Center X'] > 0) & (df['Center Y'] > 0)]
+
+# 2) ── Scale coordinates ───────────────────────────────────────────────────────
+x = df['Center X'].values * 0.35 #change the value according to camera pixel size and objective magnification
+y = df['Center Y'].values * 0.35  #change the value according to camera pixel size and objective magnification
+
+# 3) ── Compute global period_x via FFT ────────────────────────────────────────
+hist_x, x_edges = np.histogram(x, bins=500) #Change the bins if the code cannot detect any period
+fft_x = np.abs(fft(hist_x))
+freqs_x = fftfreq(len(hist_x), d=(x_edges[1] - x_edges[0]))
+pos = freqs_x > 0
+period_x = 1.0 / freqs_x[pos][np.argmax(fft_x[pos])]
+print(f"Estimated X period: {period_x:.2f} µm")
+
+# 4) ── Index each point by its “period cell” along X ──────────────────────────
+period_idx = np.floor(x / period_x).astype(int)
+# previous‑cell index (for leveling)
+period_idx_prev = np.clip(period_idx - 1, 0, None)
+
+# 5) ── Measure the Y‑shift between cells automatically ────────────────────────
+cell_ids   = np.unique(period_idx)
+cell_means = np.array([ y[period_idx == i].mean() for i in cell_ids ])
+# shift from cell i → i+1:
+shifts      = np.diff(cell_means)
+shift_per_period = shifts.mean()
+print("Measured shifts per cell:", shifts)
+print(f"Average shift per period = {shift_per_period:.3f} µm")
+
+# 6) ── Split into “runs” based on ΔY condition ─────────────────────────────────
+runs, current = [], []
+for _, row in df.sort_values(['Video Name','Frame Number']).iterrows():
+    y_val     = row['Center Y'] * 0.35
+    frame     = row['Frame Number']
+
+    if current:
+        prev_y     = current[-1]['Center Y'] * 0.35 #change the number according to camera pixel size and objective magnification
+        prev_frame = current[-1]['Frame Number']
+        # if the jump in Y is small OR the frame number didn't change, start a new run
+        if abs(y_val - prev_y) <= 5 or frame == prev_frame:
+            runs.append(current)
+            current = []
+
+    current.append(row)
+
+# catch the last one
+if current:
+    runs.append(current)
+
+# 7) ── For each run: filter by ΔX, level by measured shift, wrap into [0,period_x) ─
+all_x_wrapped, all_y_wrapped, all_dx = [], [], []
+
+for run in runs:
+    xs = np.array([r['Center X'] for r in run]) * 0.35 #change the number according to camera pixel size and objective magnification
+    ys = np.array([r['Center Y'] for r in run]) * 0.35  #change the number according to camera pixel size and objective magnification
+    dx = np.diff(xs)
+
+    # keep only small jumps
+    mask = np.abs(dx) <= 10 #change the number based on the size of particles
+    xs_filt = xs[1:][mask]
+    ys_filt = ys[1:][mask]
+    dx_filt = dx[mask]/2
+
+    # compute each point’s cell index (after filtering)
+    idx = np.floor(xs_filt / period_x).astype(int)
+    idx_prev = np.clip(idx-1, 0, None)
+
+    # level Y by measured shift of previous cell
+    y_leveled = ys_filt - idx_prev * shift_per_period
+
+    # wrap both axes into [0,period_x)
+    xw = np.mod(xs_filt, period_x)
+    yw = np.mod(y_leveled, period_x)
+
+    all_x_wrapped.append(xw)
+    all_y_wrapped.append(yw)
+    all_dx.append(np.abs(dx_filt))
+
+# 8) ── Flatten lists into arrays ───────────────────────────────────────────────
+all_x_wrapped = np.concatenate(all_x_wrapped)
+all_y_wrapped = np.concatenate(all_y_wrapped)
+all_dx        = np.concatenate(all_dx)
+
+# 9) ── Plot: single big scatter with color = |ΔX| ──────────────────────────────
+plt.figure(figsize=(30,30))
+sc = plt.scatter(
+    all_x_wrapped, all_y_wrapped,
+    c=all_dx, s=500, alpha=0.7, cmap='viridis'
+)
+cbar = plt.colorbar(sc, label='Velocity(µm/ms)')
+cbar.ax.yaxis.label.set_size(50)
+cbar.ax.tick_params(labelsize=45)
+
+plt.xlabel("X-Unit cell (µm)", fontsize=50)
+plt.ylabel("Y-Unit cell (µm)", fontsize=50)
+plt.grid(True)
+plt.gca().set_aspect('equal', adjustable='box')
+plt.tick_params(axis='both', which='major', labelsize=45)
+plt.ylim(0,period_x)
+plt.tight_layout()
+plt.savefig(r'Path_to_save_the_plot')
