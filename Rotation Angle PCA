@@ -1,0 +1,140 @@
+import cv2
+import os
+import numpy as np
+import csv
+from math import atan2, degrees, pi
+
+def draw_axis(img, p_, q_, colour, scale):
+    p = list(p_)
+    q = list(q_)
+    angle = atan2(p[1] - q[1], p[0] - q[0])
+    hypotenuse = np.sqrt((p[1] - q[1]) ** 2 + (p[0] - q[0]) ** 2)
+    q[0] = p[0] - scale * hypotenuse * np.cos(angle)
+    q[1] = p[1] - scale * hypotenuse * np.sin(angle)
+    cv2.line(img, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), colour, 2, cv2.LINE_AA)
+    p[0] = q[0] + 9 * np.cos(angle + pi / 4)
+    p[1] = q[1] + 9 * np.sin(angle + pi / 4)
+    cv2.line(img, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), colour, 2, cv2.LINE_AA)
+    p[0] = q[0] + 9 * np.cos(angle - pi / 4)
+    p[1] = q[1] + 9 * np.sin(angle - pi / 4)
+    cv2.line(img, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), colour, 2, cv2.LINE_AA)
+
+def detect_tip_with_box_method(contour, img):
+    data_pts = contour.reshape(-1, 2).astype(np.float64)
+    mean, eigenvectors, eigenvalues = cv2.PCACompute2(data_pts, mean=np.empty((0,)))
+    center = mean[0]
+    major_axis_dir = eigenvectors[0] / np.linalg.norm(eigenvectors[0])
+    major_length = np.sqrt(eigenvalues[0]) * 2
+    shift_distance = 0.5 * major_length
+
+    centers = [
+        center + shift_distance * major_axis_dir,
+        center - shift_distance * major_axis_dir
+    ]
+    box_size = (float(major_length * 1), float(major_length * 1))
+    angle = degrees(atan2(major_axis_dir[1], major_axis_dir[0]))
+
+    intersection_areas = []
+    for c in centers:
+        rect = (tuple(map(float, c)), box_size, float(angle))
+        box = cv2.boxPoints(rect).astype(np.int32)
+        mask_box = np.zeros(img.shape[:2], dtype=np.uint8)
+        cv2.drawContours(mask_box, [box], -1, 255, -1)
+        mask_contour = np.zeros(img.shape[:2], dtype=np.uint8)
+        cv2.drawContours(mask_contour, [contour], -1, 255, -1)
+        intersection = cv2.bitwise_and(mask_box, mask_contour)
+        area = cv2.countNonZero(intersection)
+        intersection_areas.append(area)
+
+    tip_idx = np.argmin(intersection_areas)
+    tip_center = centers[tip_idx]
+
+    for idx, c in enumerate(centers):
+        color = (0, 255, 0) if idx == tip_idx else (0, 0, 255)
+        rect = (tuple(map(float, c)), box_size, float(angle))
+        box = cv2.boxPoints(rect).astype(np.int32)
+        cv2.drawContours(img, [box], -1, color, 2)
+
+    cv2.arrowedLine(img, (int(center[0]), int(center[1])), (int(tip_center[0]), int(tip_center[1])), (255, 0, 255), 2)
+
+    p1 = (center[0] + 1 * eigenvectors[0, 0] * eigenvalues[0, 0],
+          center[1] + 1 * eigenvectors[0, 1] * eigenvalues[0, 0])
+    p2 = (center[0] - 1 * eigenvectors[1, 0] * eigenvalues[1, 0],
+          center[1] - 1 * eigenvectors[1, 1] * eigenvalues[1, 0])
+
+    draw_axis(img, center, p1, (0, 255, 255), 1)
+    draw_axis(img, center, p2, (255, 0, 0), 1)
+
+    tip_angle = degrees(atan2(tip_center[1] - center[1], tip_center[0] - center[0]))
+    return center, tip_angle
+
+def process_frame(frame, frame_number):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 128, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    external_contours = [cnt for cnt in contours if 100000 > cv2.contourArea(cnt) > 100]
+
+    results = []
+    for contour in external_contours:
+        if len(contour) >= 5:
+            center, angle = detect_tip_with_box_method(contour, frame)
+            results.append((center, angle))
+
+    return frame, results
+
+def process_video(input_video_path, output_folder, csv_writer):
+    video_cap = cv2.VideoCapture(input_video_path)
+    frame_width = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = video_cap.get(cv2.CAP_PROP_FPS)
+
+    video_name = os.path.splitext(os.path.basename(input_video_path))[0]
+    output_video_path = os.path.join(output_folder, f'{video_name}_processed_with_box_tip.avi')
+    os.makedirs(output_folder, exist_ok=True)
+    video_writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'XVID'), fps, (frame_width, frame_height))
+
+    frame_number = 0
+    while video_cap.isOpened():
+        ret, frame = video_cap.read()
+        if not ret:
+            break
+
+        processed_frame, results = process_frame(frame, frame_number)
+        video_writer.write(processed_frame)
+
+        for center, angle in results:
+            csv_writer.writerow({
+                'Video Name': video_name,
+                'Frame Number': frame_number,
+                'Center X': center[0],
+                'Center Y': center[1],
+                'Tip Orientation Angle': angle
+            })
+
+        frame_number += 1
+
+    video_cap.release()
+    video_writer.release()
+    print(f"Processing completed for {input_video_path}")
+
+def batch_process_videos(input_folder, output_folder):
+    os.makedirs(output_folder, exist_ok=True)
+    csv_output_path = os.path.join(output_folder, 'combined_box_tip_results.csv')
+
+    with open(csv_output_path, mode='w', newline='') as csv_file:
+        fieldnames = ['Video Name', 'Frame Number', 'Center X', 'Center Y', 'Tip Orientation Angle']
+        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        csv_writer.writeheader()
+
+        for filename in os.listdir(input_folder):
+            if filename.endswith('.avi'):
+                input_video_path = os.path.join(input_folder, filename)
+                process_video(input_video_path, output_folder, csv_writer)
+
+    print(f"Batch processing completed. Results saved to {csv_output_path}")
+
+# Example usage
+input_folder = r'Path_to_segmented_video'
+output_folder = r'Path_to_save_csv_file_and_annotated_videos' 
+batch_process_videos(input_folder, output_folder)
