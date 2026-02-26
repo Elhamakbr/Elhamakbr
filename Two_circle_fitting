@@ -1,14 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Robust two-circle fitting for peanut/snowman-like particles in BINARY images (batch)
-
-Key change vs previous version:
-- fit_ok is TRUE only if the fitted circles are GOOD fits, not just "two circles exist".
-  We validate with:
-  (1) normalized boundary radial error (per lobe)
-  (2) fill factor = lobe_area / (pi r^2) within a range
-  (3) peak separation sanity (two lobes must be separated enough)
-
 Outputs:
 - Kept/       : binary masks that pass basic prefilter
 - Rejected/   : binary masks rejected by basic prefilter
@@ -37,7 +29,7 @@ from skimage.feature import peak_local_max
 # =========================
 # USER SETTINGS
 # =========================
-input_dir = Path(r"C:\Users\el4003ak\Dropbox\Peeanut_and_snowman_SEM_image_DEC_NOV_2024\nonsphericalbeads19DEC2024\SAM_binary_masks_individual")
+input_dir = Path(r"...")
 
 out_kept = input_dir / "Kept"
 out_rej  = input_dir / "Rejected"
