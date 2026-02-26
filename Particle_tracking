@@ -46,12 +46,12 @@ from scipy.optimize import linear_sum_assignment
 # --- Choose ONE mode ---
 VIDEO_PATH = None  # e.g. r"E:\path\to\one_binary_video.mp4"
 INPUT_FOLDER = Path(
-    r"C:\Users\el4003ak\Dropbox\xtra---PAPER_Elham_ShapeSorting_JUNE2025 copy\Figures_and_csv_files\03_june_bacteria_sorting\long in y-axis\processed"
+    r"...\input_path"
 )
 VIDEO_GLOB = "*.avi"
 
 OUTPUT_FOLDER = Path(
-    r"C:\Users\el4003ak\Dropbox\xtra---PAPER_Elham_ShapeSorting_JUNE2025 copy\Figures_and_csv_files\03_june_bacteria_sorting\long in y-axis\processed\tracking_outputs"
+    r"...\tracking_outputs"
 )
 OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
