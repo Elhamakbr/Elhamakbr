@@ -1,0 +1,362 @@
+# -*- coding: utf-8 -*-
+"""
+Robust two-circle fitting for peanut/snowman-like particles in BINARY images (batch)
+
+Key change vs previous version:
+- fit_ok is TRUE only if the fitted circles are GOOD fits, not just "two circles exist".
+  We validate with:
+  (1) normalized boundary radial error (per lobe)
+  (2) fill factor = lobe_area / (pi r^2) within a range
+  (3) peak separation sanity (two lobes must be separated enough)
+
+Outputs:
+- Kept/       : binary masks that pass basic prefilter
+- Rejected/   : binary masks rejected by basic prefilter
+- Annotated/  : ONLY images with VALID two-circle fits (fit_ok == True)
+- two_circle_diameters.csv : diameters + fit quality metrics
+- prefilter_log.csv        : keep/reject + reasons
+
+Author: (adapted for Elham)
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import shutil
+import numpy as np
+import pandas as pd
+import cv2
+
+from scipy.ndimage import distance_transform_edt, binary_fill_holes
+from skimage.measure import label, regionprops, find_contours
+from skimage.morphology import remove_small_objects, binary_closing, disk
+from skimage.segmentation import watershed
+from skimage.feature import peak_local_max
+
+
+# =========================
+# USER SETTINGS
+# =========================
+input_dir = Path(r"C:\Users\el4003ak\Dropbox\Peeanut_and_snowman_SEM_image_DEC_NOV_2024\nonsphericalbeads19DEC2024\SAM_binary_masks_individual")
+
+out_kept = input_dir / "Kept"
+out_rej  = input_dir / "Rejected"
+out_ann  = input_dir / "Annotated"
+out_kept.mkdir(parents=True, exist_ok=True)
+out_rej.mkdir(parents=True, exist_ok=True)
+out_ann.mkdir(parents=True, exist_ok=True)
+
+csv_path = input_dir / "two_circle_diameters.csv"
+log_path = input_dir / "prefilter_log.csv"
+
+exts = (".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp")
+
+# ---- BASIC PREFILTER (keep/reject images) ----
+MIN_AREA = 200
+MAX_AREA = 200000
+REJECT_IF_BORDER_TOUCH = True
+BORDER_MARGIN = 1
+
+# If frames sometimes have multiple particles, keep this False (we’ll still avoid annotating bad fits)
+# If you truly expect exactly one particle per frame, set True to reject multi-object frames early.
+REQUIRE_SINGLE_OBJECT = False
+
+# ---- MASK CLEANUP ----
+MIN_OBJ_PIXELS = 30
+CLOSE_RADIUS = 2
+
+# ---- TWO-LOBE SPLIT (watershed seeds = DT peaks) ----
+PEAK_MIN_DISTANCE = 5
+PEAK_THRESHOLD_ABS = 2
+
+# Additional sanity: peaks must be separated by at least this many pixels
+MIN_PEAK_SEPARATION = 6
+
+# ---- FIT QUALITY GATES (THIS FIXES YOUR PROBLEM) ----
+# Normalized mean radial error on boundary: mean(|dist_to_center - r|) / r
+MAX_NORM_RADIAL_ERR = 0.12   # tighten to 0.08 if you want stricter
+
+# Fill factor per lobe: area / (pi r^2)
+# Perfect disk -> 1.0 ; crescents/arcs -> << 1
+FILL_MIN = 0.55              # raise (0.65) to reject more partial lobes
+FILL_MAX = 1.35              # allow a bit >1 due to pixelation/fit
+
+# Optional radius range (turn on if you know your particle size in pixels)
+USE_RADIUS_RANGE = False
+MIN_R = 5
+MAX_R = 200
+# =========================
+
+
+def read_binary(path: Path) -> np.ndarray:
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f"Could not read: {path}")
+    return (img > 0).astype(np.uint8)
+
+
+def clean_mask(bw01: np.ndarray) -> np.ndarray:
+    m = bw01.astype(bool)
+    m = remove_small_objects(m, MIN_OBJ_PIXELS)
+    m = binary_fill_holes(m)
+    m = binary_closing(m, footprint=disk(CLOSE_RADIUS))
+    return m.astype(np.uint8)
+
+
+def touches_border(bbox, shape, margin=1) -> bool:
+    minr, minc, maxr, maxc = bbox
+    H, W = shape
+    return (minr <= margin) or (minc <= margin) or (maxr >= H - margin) or (maxc >= W - margin)
+
+
+def prefilter_largest_component(bw01: np.ndarray):
+    lab = label(bw01, connectivity=2)
+    props = regionprops(lab)
+    n_objects = len(props)
+
+    if n_objects == 0:
+        return "reject_no_object", {"n_objects": 0}, None
+
+    props_sorted = sorted(props, key=lambda r: r.area, reverse=True)
+    r = props_sorted[0]
+
+    area = int(r.area)
+    tb = touches_border(r.bbox, bw01.shape, margin=BORDER_MARGIN)
+
+    metrics = {
+        "n_objects": n_objects,
+        "largest_area": area,
+        "touches_border": bool(tb),
+    }
+
+    ok = True
+    reason = ""
+
+    if REQUIRE_SINGLE_OBJECT and n_objects != 1:
+        ok = False
+        reason = "not_single_object"
+    elif not (MIN_AREA <= area <= MAX_AREA):
+        ok = False
+        reason = "area_out_of_range"
+    elif REJECT_IF_BORDER_TOUCH and tb:
+        ok = False
+        reason = "touches_border"
+
+    if not ok:
+        metrics["reject_reason"] = reason
+
+    largest = (lab == r.label).astype(np.uint8)
+    return ("keep" if ok else "reject"), metrics, largest
+
+
+def split_into_two_lobes(mask01: np.ndarray):
+    m = mask01.astype(bool)
+    if m.sum() == 0:
+        return None, None  # labels2, peaks
+
+    dist = distance_transform_edt(m)
+
+    peaks = peak_local_max(
+        dist,
+        min_distance=PEAK_MIN_DISTANCE,
+        threshold_abs=PEAK_THRESHOLD_ABS,
+        labels=m,
+        num_peaks=2
+    )
+
+    if peaks is None or len(peaks) < 2:
+        return None, None
+
+    # Peak separation sanity
+    d = np.sqrt((peaks[0, 0] - peaks[1, 0])**2 + (peaks[0, 1] - peaks[1, 1])**2)
+    if d < MIN_PEAK_SEPARATION:
+        return None, peaks
+
+    markers = np.zeros_like(mask01, dtype=np.int32)
+    markers[peaks[0, 0], peaks[0, 1]] = 1
+    markers[peaks[1, 0], peaks[1, 1]] = 2
+
+    labels2 = watershed(-dist, markers=markers, mask=m)
+
+    if (labels2 == 1).sum() == 0 or (labels2 == 2).sum() == 0:
+        return None, peaks
+
+    return labels2, peaks
+
+
+def contour_points(component01: np.ndarray):
+    contours = find_contours(component01.astype(float), 0.5)
+    if not contours:
+        return None
+    cont = max(contours, key=len)  # (row, col)
+    xy = np.column_stack([cont[:, 1], cont[:, 0]])  # x, y
+    return xy
+
+
+def fit_circle_least_squares(xy: np.ndarray):
+    x = xy[:, 0].astype(float)
+    y = xy[:, 1].astype(float)
+
+    A = np.c_[2 * x, 2 * y, np.ones_like(x)]
+    b = x**2 + y**2
+
+    cx, cy, c = np.linalg.lstsq(A, b, rcond=None)[0]
+    r2 = cx**2 + cy**2 + c
+    r = np.sqrt(max(0.0, r2))
+
+    return float(cx), float(cy), float(r)
+
+
+def circle_quality(component01: np.ndarray, circle):
+    """
+    Returns:
+      norm_radial_err, fill_factor
+    """
+    cx, cy, r = circle
+    if r <= 1 or not np.isfinite(r):
+        return np.inf, 0.0
+
+    xy = contour_points(component01)
+    if xy is None or len(xy) < 20:
+        return np.inf, 0.0
+
+    dx = xy[:, 0] - cx
+    dy = xy[:, 1] - cy
+    d = np.sqrt(dx*dx + dy*dy)
+    norm_radial_err = float(np.mean(np.abs(d - r)) / max(r, 1e-6))
+
+    area = float(component01.sum())
+    fill = float(area / (np.pi * r * r + 1e-9))
+
+    return norm_radial_err, fill
+
+
+def draw_annotation(mask01: np.ndarray, circles, save_path: Path):
+    base = (mask01 * 255).astype(np.uint8)
+    ann = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+
+    for k, c in enumerate(circles):
+        if c is None:
+            continue
+        cx, cy, r = c
+        center = (int(round(cx)), int(round(cy)))
+        rr = int(round(r))
+
+        cv2.circle(ann, center, rr, (0, 255, 0), 2)
+        cv2.circle(ann, center, 2, (0, 0, 255), -1)
+
+    cv2.imwrite(str(save_path), ann)
+
+
+# =========================
+# MAIN
+# =========================
+rows = []
+log_rows = []
+
+files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+files = sorted(files, key=lambda x: x.name.lower())
+
+for p in files:
+    try:
+        bw = read_binary(p)
+        bw = clean_mask(bw)
+
+        decision, metrics, largest = prefilter_largest_component(bw)
+
+        if decision != "keep":
+            cv2.imwrite(str(out_rej / p.name), (bw * 255).astype(np.uint8))
+            log_rows.append({"file": p.name, "decision": decision, **metrics})
+            continue
+
+        cv2.imwrite(str(out_kept / p.name), (bw * 255).astype(np.uint8))
+        log_rows.append({"file": p.name, "decision": "keep", **metrics})
+
+        obj = largest.astype(np.uint8)
+
+        circles = [None, None]
+        q_err = [np.nan, np.nan]
+        q_fill = [np.nan, np.nan]
+        peaks_sep = np.nan
+
+        labels2, peaks = split_into_two_lobes(obj)
+        if peaks is not None and len(peaks) >= 2:
+            peaks_sep = float(np.sqrt((peaks[0, 0] - peaks[1, 0])**2 + (peaks[0, 1] - peaks[1, 1])**2))
+
+        if labels2 is not None:
+            for lab_id, idx in [(1, 0), (2, 1)]:
+                comp = (labels2 == lab_id).astype(np.uint8)
+                xy = contour_points(comp)
+                if xy is None or len(xy) < 20:
+                    continue
+
+                cx, cy, r = fit_circle_least_squares(xy)
+
+                # basic radius sanity
+                if not np.isfinite(r) or r <= 1:
+                    continue
+                if USE_RADIUS_RANGE and not (MIN_R <= r <= MAX_R):
+                    continue
+
+                # quality metrics
+                nerr, fill = circle_quality(comp, (cx, cy, r))
+                q_err[idx] = nerr
+                q_fill[idx] = fill
+
+                circles[idx] = (cx, cy, r)
+
+        # ---- FINAL fit_ok = GOOD FIT ----
+        fit_ok = (
+            (circles[0] is not None) and (circles[1] is not None)
+            and np.isfinite(q_err[0]) and np.isfinite(q_err[1])
+            and (q_err[0] <= MAX_NORM_RADIAL_ERR) and (q_err[1] <= MAX_NORM_RADIAL_ERR)
+            and (FILL_MIN <= q_fill[0] <= FILL_MAX) and (FILL_MIN <= q_fill[1] <= FILL_MAX)
+        )
+
+        ann_name = ""
+        if fit_ok:
+            ann_path = out_ann / f"{p.stem}_circles.png"
+            draw_annotation(obj, circles, ann_path)
+            ann_name = ann_path.name
+
+        rows.append({
+            "file": p.name,
+            "fit_ok": bool(fit_ok),
+            "annotated_image": ann_name,
+
+            "circle1_r": (circles[0][2] if circles[0] else np.nan),
+            "circle1_diameter": (2.0 * circles[0][2] if circles[0] else np.nan),
+            "circle1_norm_radial_err": q_err[0],
+            "circle1_fill_factor": q_fill[0],
+
+            "circle2_r": (circles[1][2] if circles[1] else np.nan),
+            "circle2_diameter": (2.0 * circles[1][2] if circles[1] else np.nan),
+            "circle2_norm_radial_err": q_err[1],
+            "circle2_fill_factor": q_fill[1],
+
+            "peaks_separation_px": peaks_sep,
+
+            "n_objects": metrics.get("n_objects", np.nan),
+            "largest_area": metrics.get("largest_area", np.nan),
+            "touches_border": metrics.get("touches_border", np.nan),
+        })
+
+    except Exception as e:
+        try:
+            shutil.copy2(p, out_rej / p.name)
+        except Exception:
+            pass
+        log_rows.append({"file": p.name, "decision": "reject_error", "error": str(e)})
+
+df = pd.DataFrame(rows)
+df.to_csv(csv_path, index=False)
+
+df_log = pd.DataFrame(log_rows)
+df_log.to_csv(log_path, index=False)
+
+print("Done.")
+print("CSV:", csv_path)
+print("Log:", log_path)
+print("Annotated (fit_ok only):", out_ann)
+if not df.empty:
+    print(df["fit_ok"].value_counts(dropna=False))
