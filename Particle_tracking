@@ -1,0 +1,597 @@
+
+"""
+Binary MP4/AVI object tracking + TRUE 0–360° angle using Code-1 PCA + "two shifted boxes" tip method
++ sanity-check overlay video with track lines drawn.
+
+Adds ellipse fitting outputs + circularity metrics.
+
+INPUT:
+- Videos that are binary masks (object=1 or 255, background=0)
+
+OUTPUT (per video):
+1) CSV: per-object per-frame:
+   video_name, frame, track_id, cx, cy, area_px,
+   angle_deg_360, head_x, head_y,
+   bbox_x, bbox_y, bbox_w, bbox_h,
+   major_axis_px, minor_axis_px, ellipse_angle_180,
+   ellipse_circularity, circularity_4pi
+2) MP4 overlay video: original binary as background + colored track trails + IDs + head arrow
+
+Angle definition (0–360°):
+- Compute PCA on contour points to get major axis direction.
+- Define two candidate "tip" centers at ± shift along the major axis.
+- Build rotated boxes around each candidate and pick the side with smaller overlap
+  (here: fewer contour points inside the box; fast proxy to code-1 intersection area).
+- Use prev_angle as tie-breaker to prevent flips when overlap is similar.
+- Angle = atan2(tip_y - cy, tip_x - cx) mapped to [0, 360).
+
+Author: Elham
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import cv2
+import numpy as np
+import pandas as pd
+
+# pip install scipy
+from scipy.optimize import linear_sum_assignment
+
+
+# =========================================================
+# USER SETTINGS
+# =========================================================
+
+# --- Choose ONE mode ---
+VIDEO_PATH = None  # e.g. r"E:\path\to\one_binary_video.mp4"
+INPUT_FOLDER = Path(
+    r"C:\Users\el4003ak\Dropbox\xtra---PAPER_Elham_ShapeSorting_JUNE2025 copy\Figures_and_csv_files\03_june_bacteria_sorting\long in y-axis\processed"
+)
+VIDEO_GLOB = "*.avi"
+
+OUTPUT_FOLDER = Path(
+    r"C:\Users\el4003ak\Dropbox\xtra---PAPER_Elham_ShapeSorting_JUNE2025 copy\Figures_and_csv_files\03_june_bacteria_sorting\long in y-axis\processed\tracking_outputs"
+)
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+# Detection (binary masks)
+BIN_THRESH = 127
+MIN_AREA_PX = 50
+MAX_AREA_PX = None
+CONNECTIVITY = 8
+
+# Tracking
+MAX_MOVE_PX = 25.0
+AREA_TOL = 2.0
+MAX_GAP = 5
+
+# Cost weights
+COST_W_DIST = 1.0
+COST_W_AREA = 10.0
+COST_W_ANG  = 0.8
+
+# Angle in assignment cost
+USE_ANGLE_IN_COST = True
+
+# PCA+box head/tip parameters
+TIP_TIE_EPS = 2.0          # if overlap counts differ by <= this, use prev_angle tie-break
+TIP_SHIFT_FRAC = 0.5       # shift distance as fraction of PCA-derived major_len
+TIP_BOX_SCALE = 1.0        # box size = major_len * TIP_BOX_SCALE (square)
+PCA_MAJORLEN_FACTOR = 2.0  # major_len = factor * sqrt(eigenvalue0)
+
+# Overlay video
+WRITE_OVERLAY_VIDEO = True
+TRAIL_LEN = 60
+DRAW_HEAD_ARROW = True
+ARROW_LEN_PX = 25
+TEXT_SCALE = 0.5
+TEXT_THICKNESS = 1
+LINE_THICKNESS = 2
+FPS_FALLBACK = 30
+
+
+# =========================================================
+# ANGLE / GEOMETRY HELPERS
+# =========================================================
+
+def angle360_from_vector(dx: float, dy: float) -> float:
+    ang = np.degrees(np.arctan2(dy, dx))  # -180..180
+    return float(ang % 360.0)
+
+def circ_diff_deg(a: float, b: float, wrap: float = 360.0) -> float:
+    d = (a - b) % wrap
+    if d > wrap / 2:
+        d -= wrap
+    return float(d)
+
+def angle_diff_wrapped(a: float, b: float, wrap: float = 360.0) -> float:
+    return abs(circ_diff_deg(a, b, wrap=wrap))
+
+def to_binary01_from_frame(frame_bgr_or_gray, thr: int = 127) -> np.ndarray:
+    if frame_bgr_or_gray.ndim == 3:
+        gray = cv2.cvtColor(frame_bgr_or_gray, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame_bgr_or_gray
+
+    if gray.max() <= 1:
+        gray = (gray.astype(np.uint8) * 255)
+
+    _, bw = cv2.threshold(gray, thr, 1, cv2.THRESH_BINARY)
+    return bw.astype(np.uint8)
+
+
+def choose_head_from_contour_pca_box(
+    contour_xy: np.ndarray,
+    cx: float,
+    cy: float,
+    prev_angle: float | None = None,
+    tie_eps: float = TIP_TIE_EPS,
+    shift_frac: float = TIP_SHIFT_FRAC,
+    box_scale: float = TIP_BOX_SCALE,
+    majorlen_factor: float = PCA_MAJORLEN_FACTOR,
+) -> tuple[float | None, float | None, float | None]:
+    """
+    Code-1 style head/tip detection using PCA + two shifted rotated boxes.
+
+    Fast overlap proxy:
+      Count how many contour points fall inside each candidate rotated box.
+      Choose the candidate with fewer points (smaller overlap) as the tip side.
+
+    Tie-break:
+      If overlap counts are very similar (|n1-n2| <= tie_eps) and prev_angle exists,
+      pick the candidate whose resulting angle is closer to prev_angle (prevents flips).
+
+    Returns:
+      ang360, head_x, head_y   (all floats) or (None, None, None) if fails
+    """
+    pts = np.asarray(contour_xy, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[0] < 5:
+        return None, None, None
+
+    data_pts = pts.astype(np.float64)
+    mean, eigenvectors, eigenvalues = cv2.PCACompute2(data_pts, mean=np.empty((0,)))
+
+    center = mean[0]  # (x,y)
+    v0 = eigenvectors[0].astype(np.float64)
+    nrm = float(np.linalg.norm(v0))
+    if nrm == 0:
+        return None, None, None
+    major_dir = v0 / nrm
+
+    # PCA eigenvalue is variance along axis (px^2). sqrt -> std dev in px.
+    ev0 = float(eigenvalues[0][0]) if eigenvalues.shape[0] > 0 else 0.0
+    major_len = float(majorlen_factor * np.sqrt(max(ev0, 1e-12)))
+
+    # candidate centers
+    shift = float(shift_frac * major_len)
+    c1 = center + shift * major_dir
+    c2 = center - shift * major_dir
+
+    # rotated box
+    rect_angle = float(np.degrees(np.arctan2(major_dir[1], major_dir[0])))
+    box_size = (float(major_len * box_scale), float(major_len * box_scale))
+
+    def count_points_in_rotated_box(c: np.ndarray) -> int:
+        rect = (tuple(map(float, c)), box_size, rect_angle)
+        box = cv2.boxPoints(rect)  # (4,2)
+        cnt = 0
+        for p in pts:
+            # >=0 means inside or on edge
+            if cv2.pointPolygonTest(box, (float(p[0]), float(p[1])), False) >= 0:
+                cnt += 1
+        return cnt
+
+    n1 = count_points_in_rotated_box(c1)
+    n2 = count_points_in_rotated_box(c2)
+
+    a1 = angle360_from_vector(c1[0] - center[0], c1[1] - center[1])
+    a2 = angle360_from_vector(c2[0] - center[0], c2[1] - center[1])
+
+    if abs(n1 - n2) <= tie_eps and (prev_angle is not None):
+        d1 = angle_diff_wrapped(a1, prev_angle, wrap=360.0)
+        d2 = angle_diff_wrapped(a2, prev_angle, wrap=360.0)
+        if d1 <= d2:
+            tip = c1
+            ang = a1
+        else:
+            tip = c2
+            ang = a2
+    else:
+        if n1 <= n2:
+            tip = c1
+            ang = a1
+        else:
+            tip = c2
+            ang = a2
+
+    return float(ang), float(tip[0]), float(tip[1])
+
+
+# =========================================================
+# DETECTION
+# =========================================================
+
+def extract_detections_from_mask(mask01, min_area=30, max_area=None, connectivity=8):
+    """
+    From binary mask (0/1), return detections:
+      cx, cy, area_px, bbox, contour_xy,
+      ellipse_major_px, ellipse_minor_px, ellipse_angle_180,
+      ellipse_circularity (minor/major),
+      circularity_4pi = 4πA/P² (boundary-based)
+    """
+    mask255 = (mask01 * 255).astype(np.uint8)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        mask255, connectivity=connectivity
+    )
+
+    dets = []
+    for lab in range(1, num_labels):
+        x, y, w, h, area = stats[lab].tolist()
+        if area < min_area:
+            continue
+        if max_area is not None and area > max_area:
+            continue
+
+        cx, cy = centroids[lab].tolist()
+
+        comp = (labels == lab).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            continue
+
+        cont = max(contours, key=cv2.contourArea)
+        cont_xy = cont.reshape(-1, 2)
+
+        # ---- Perimeter & standard circularity (shape-based) ----
+        perimeter = float(cv2.arcLength(cont, True))
+        if perimeter > 0:
+            circularity_4pi = float(4.0 * np.pi * area / (perimeter * perimeter))
+        else:
+            circularity_4pi = None
+
+        # ---- Ellipse fit outputs ----
+        ellipse_major = None
+        ellipse_minor = None
+        ellipse_angle_180 = None
+        ellipse_circularity = None  # minor/major in (0..1]
+
+        if len(cont) >= 5:
+            try:
+                (ex, ey), (MA, ma), ang = cv2.fitEllipse(cont)
+                major = float(max(MA, ma))
+                minor = float(min(MA, ma))
+                ellipse_major = major
+                ellipse_minor = minor
+                ellipse_angle_180 = float(ang)  # OpenCV convention, typically [0,180)
+
+                if major > 0:
+                    ellipse_circularity = float(minor / major)
+            except cv2.error:
+                pass
+
+        dets.append({
+            "cx": float(cx),
+            "cy": float(cy),
+            "area_px": int(area),
+            "bbox_x": int(x),
+            "bbox_y": int(y),
+            "bbox_w": int(w),
+            "bbox_h": int(h),
+            "contour_xy": cont_xy,
+
+            "major_axis_px": ellipse_major,
+            "minor_axis_px": ellipse_minor,
+            "ellipse_angle_180": ellipse_angle_180,
+            "ellipse_circularity": ellipse_circularity,
+            "circularity_4pi": circularity_4pi,
+        })
+
+    return dets
+
+
+# =========================================================
+# TRACKING CORE
+# =========================================================
+
+def predict_track_xy(track):
+    hist = track["history"]
+    if len(hist) >= 2:
+        (x1, y1) = hist[-2]
+        (x2, y2) = hist[-1]
+        return (x2 + (x2 - x1), y2 + (y2 - y1))
+    return hist[-1]
+
+def build_cost_matrix(tracks, dets):
+    INF = 1e9
+    C = np.full((len(tracks), len(dets)), INF, dtype=np.float64)
+
+    for i, tr in enumerate(tracks):
+        px, py = tr["pred_xy"]
+        ta = tr["last_area"]
+        tangle = tr["last_angle"]
+
+        for j, d in enumerate(dets):
+            dist = float(np.hypot(d["cx"] - px, d["cy"] - py))
+            if dist > MAX_MOVE_PX:
+                continue
+
+            area_term = 0.0
+            if ta is not None and ta > 0:
+                ratio = d["area_px"] / ta
+                if ratio < (1.0 / AREA_TOL) or ratio > AREA_TOL:
+                    continue
+                area_term = abs(np.log(ratio))
+
+            ang_term = 0.0
+            if USE_ANGLE_IN_COST and (tangle is not None):
+                dang, _, _ = choose_head_from_contour_pca_box(
+                    d["contour_xy"], d["cx"], d["cy"], prev_angle=tangle
+                )
+                if dang is not None:
+                    ang_term = angle_diff_wrapped(tangle, dang, wrap=360.0)
+
+            C[i, j] = COST_W_DIST * dist + COST_W_AREA * area_term + COST_W_ANG * ang_term
+
+    return C
+
+def color_for_id(track_id):
+    r = (track_id * 53) % 256
+    g = (track_id * 97) % 256
+    b = (track_id * 193) % 256
+    return (int(b), int(g), int(r))
+
+
+def track_one_video(video_path: Path, out_dir: Path):
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Could not open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps is None or fps <= 0:
+        fps = FPS_FALLBACK
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if width <= 0 or height <= 0:
+        ok, fr = cap.read()
+        if not ok:
+            cap.release()
+            raise IOError(f"Empty / unreadable video: {video_path}")
+        height, width = fr.shape[:2]
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    overlay_writer = None
+    overlay_path = None
+    if WRITE_OVERLAY_VIDEO:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        overlay_path = out_dir / f"{video_path.stem}_tracks_overlay.mp4"
+        overlay_writer = cv2.VideoWriter(str(overlay_path), fourcc, fps, (width, height), True)
+
+    video_name = video_path.name
+    frame_idx = 0
+
+    next_track_id = 1
+    active_tracks = []
+    rows = []
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        mask01 = to_binary01_from_frame(frame, thr=BIN_THRESH)
+        dets = extract_detections_from_mask(
+            mask01,
+            min_area=MIN_AREA_PX,
+            max_area=MAX_AREA_PX,
+            connectivity=CONNECTIVITY
+        )
+
+        for tr in active_tracks:
+            tr["pred_xy"] = predict_track_xy(tr)
+
+        matched_tr = set()
+        matched_det = set()
+
+        if active_tracks and dets:
+            C = build_cost_matrix(active_tracks, dets)
+            r_ind, c_ind = linear_sum_assignment(C)
+
+            for r, c in zip(r_ind, c_ind):
+                if C[r, c] >= 1e8:
+                    continue
+
+                matched_tr.add(r)
+                matched_det.add(c)
+
+                tr = active_tracks[r]
+                d = dets[c]
+
+                prev_ang = tr["last_angle"]
+                ang360, hx, hy = choose_head_from_contour_pca_box(
+                    d["contour_xy"], d["cx"], d["cy"], prev_angle=prev_ang
+                )
+
+                tr["history"].append((d["cx"], d["cy"]))
+                if len(tr["history"]) > TRAIL_LEN:
+                    tr["history"] = tr["history"][-TRAIL_LEN:]
+
+                tr["last_area"] = d["area_px"]
+                tr["last_angle"] = ang360
+                tr["last_head"] = (hx, hy)
+                tr["missed"] = 0
+
+                tr["last_major"] = d["major_axis_px"]
+                tr["last_minor"] = d["minor_axis_px"]
+                tr["last_ell_ang"] = d["ellipse_angle_180"]
+                tr["last_ell_circ"] = d["ellipse_circularity"]
+                tr["last_circ_4pi"] = d["circularity_4pi"]
+
+                rows.append({
+                    "video_name": video_name,
+                    "frame": frame_idx,
+                    "track_id": tr["id"],
+                    "cx": d["cx"],
+                    "cy": d["cy"],
+                    "area_px": d["area_px"],
+                    "angle_deg_360": ang360,
+                    "head_x": hx,
+                    "head_y": hy,
+                    "bbox_x": d["bbox_x"],
+                    "bbox_y": d["bbox_y"],
+                    "bbox_w": d["bbox_w"],
+                    "bbox_h": d["bbox_h"],
+
+                    "major_axis_px": d["major_axis_px"],
+                    "minor_axis_px": d["minor_axis_px"],
+                    "ellipse_angle_180": d["ellipse_angle_180"],
+                    "ellipse_circularity": d["ellipse_circularity"],
+                    "circularity_4pi": d["circularity_4pi"],
+                })
+
+        for i, tr in enumerate(active_tracks):
+            if i not in matched_tr:
+                tr["missed"] += 1
+
+        for j, d in enumerate(dets):
+            if j in matched_det:
+                continue
+
+            ang360, hx, hy = choose_head_from_contour_pca_box(
+                d["contour_xy"], d["cx"], d["cy"], prev_angle=None
+            )
+
+            tr = {
+                "id": next_track_id,
+                "history": [(d["cx"], d["cy"])],
+                "last_area": d["area_px"],
+                "last_angle": ang360,
+                "last_head": (hx, hy),
+                "missed": 0,
+                "pred_xy": (d["cx"], d["cy"]),
+
+                "last_major": d["major_axis_px"],
+                "last_minor": d["minor_axis_px"],
+                "last_ell_ang": d["ellipse_angle_180"],
+                "last_ell_circ": d["ellipse_circularity"],
+                "last_circ_4pi": d["circularity_4pi"],
+            }
+            next_track_id += 1
+            active_tracks.append(tr)
+
+            rows.append({
+                "video_name": video_name,
+                "frame": frame_idx,
+                "track_id": tr["id"],
+                "cx": d["cx"],
+                "cy": d["cy"],
+                "area_px": d["area_px"],
+                "angle_deg_360": ang360,
+                "head_x": hx,
+                "head_y": hy,
+                "bbox_x": d["bbox_x"],
+                "bbox_y": d["bbox_y"],
+                "bbox_w": d["bbox_w"],
+                "bbox_h": d["bbox_h"],
+
+                "major_axis_px": d["major_axis_px"],
+                "minor_axis_px": d["minor_axis_px"],
+                "ellipse_angle_180": d["ellipse_angle_180"],
+                "ellipse_circularity": d["ellipse_circularity"],
+                "circularity_4pi": d["circularity_4pi"],
+            })
+
+        active_tracks = [tr for tr in active_tracks if tr["missed"] <= MAX_GAP]
+
+        # ===================== Overlay drawing =====================
+        if WRITE_OVERLAY_VIDEO and overlay_writer is not None:
+            bg = (mask01 * 255).astype(np.uint8)
+            vis = cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR)
+
+            for tr in active_tracks:
+                col = color_for_id(tr["id"])
+                hist = tr["history"]
+
+                if len(hist) >= 2:
+                    pts = np.array([[int(x), int(y)] for (x, y) in hist], dtype=np.int32)
+                    cv2.polylines(vis, [pts], isClosed=False, color=col, thickness=LINE_THICKNESS)
+
+                x, y = hist[-1]
+                cv2.circle(vis, (int(x), int(y)), 3, col, -1)
+
+                ell_circ = tr.get("last_ell_circ", None)
+                if ell_circ is None:
+                    label = f"{tr['id']}"
+                else:
+                    label = f"{tr['id']}  eC={ell_circ:.2f}"
+
+                cv2.putText(
+                    vis, label,
+                    (int(x) + 5, int(y) - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, col, TEXT_THICKNESS, cv2.LINE_AA
+                )
+
+                if DRAW_HEAD_ARROW and (tr["last_angle"] is not None):
+                    ang = tr["last_angle"]
+                    x2 = int(x + ARROW_LEN_PX * np.cos(np.deg2rad(ang)))
+                    y2 = int(y + ARROW_LEN_PX * np.sin(np.deg2rad(ang)))
+                    cv2.arrowedLine(vis, (int(x), int(y)), (x2, y2), col, 2, tipLength=0.3)
+
+            overlay_writer.write(vis)
+
+        frame_idx += 1
+
+    cap.release()
+    if overlay_writer is not None:
+        overlay_writer.release()
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["track_id", "frame"]).reset_index(drop=True)
+
+    csv_path = out_dir / f"{video_path.stem}_tracks.csv"
+    df.to_csv(csv_path, index=False)
+
+    return df, csv_path, overlay_path
+
+
+# =========================================================
+# RUN
+# =========================================================
+
+def run():
+    out_dir = OUTPUT_FOLDER
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if VIDEO_PATH:
+        vp = Path(VIDEO_PATH)
+        df, csv_path, overlay_path = track_one_video(vp, out_dir)
+        print(f"Saved CSV: {csv_path} (rows={len(df)})")
+        if WRITE_OVERLAY_VIDEO:
+            print(f"Saved overlay video: {overlay_path}")
+        return
+
+    vids = sorted(INPUT_FOLDER.glob(VIDEO_GLOB))
+    if not vids:
+        raise FileNotFoundError(f"No videos found in {INPUT_FOLDER} matching {VIDEO_GLOB}")
+
+    all_dfs = []
+    for vp in vids:
+        print(f"Tracking: {vp.name}")
+        df, csv_path, overlay_path = track_one_video(vp, out_dir)
+        print(f"  CSV: {csv_path} (rows={len(df)})")
+        if WRITE_OVERLAY_VIDEO:
+            print(f"  Overlay: {overlay_path}")
+        all_dfs.append(df)
+
+    if all_dfs:
+        df_all = pd.concat(all_dfs, ignore_index=True)
+        combined = out_dir / "combined_tracks_all_videos.csv"
+        df_all.to_csv(combined, index=False)
+        print(f"Combined CSV: {combined} (rows={len(df_all)})")
+
+
+if __name__ == "__main__":
+    run()
