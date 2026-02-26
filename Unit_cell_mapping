@@ -1,0 +1,653 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb  4 10:16:17 2026
+
+@author: el4003ak
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Row-wise raw + folded plots + angle plots + y_out vs y_in (per row),
+AND combined y_out vs y_in + combined HEATMAPS (data-level overlay across rows).
+
+Author: Elham
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+from scipy.ndimage import gaussian_filter
+
+# =========================================================
+# USER SETTINGS
+# =========================================================
+CSV_PATH = r"..."
+
+Y0_FIRST = 31.0
+ROW_H = 76.0
+Y_MAX = 1000.0
+
+CELL_W = 76.0
+
+APPLY_YSHIFT = True
+DELTA_Y_PER_CELL = 0
+
+MIN_POINTS_PER_TRAJ = 5
+MIN_TRAJ_PER_ROW = 1
+
+POINT_SIZE = 20
+ALPHA = 0.8
+X_LIM = None
+
+CMAP_NAME = "tab20"
+
+SAVE_RAW_PNGS = False
+SAVE_FOLDED_PNGS = False
+SAVE_ANGLE_PNGS = False
+SAVE_YOUT_YIN_PNGS = False
+SAVE_YOUT_YIN_ALL_PNG = False
+
+FLIP_FINAL_PLOT_AROUND_Y_AXIS = True
+
+USE_ANGLE_180 = False
+ANGLE_CMAP = "turbo"
+ANGLE_TICKS = 7
+
+# Heatmap settings
+ADD_HEATMAPS = True
+HM_BINS_XY = (35, 45)        # (x bins, y bins) for x_fold vs y_fold
+HM_BINS_XA = (35, 60)        # (x bins, angle bins) for x_fold vs angle
+HM_SMOOTH_SIGMA = 0.0        # gaussian sigma in "bins"
+HM_LOG_SCALE = True          # log(1+count)
+HM_CMAP = "magma"
+
+# ---- per-row shifts in the folded unit cell (units = same as cx,cy) ----
+# IMPORTANT: keys are now WINDOW INDEX k (stable), not compressed row_id.
+ROW_SHIFTS = {
+    0: (10, -5),
+    #1: (-20, -15),
+    #2: (-22, -16),
+    #3: (-22, -30),
+    #4: (-22, -30),
+    #5: (-20, -30),
+    #6: (-20, -35),
+    #7: (-8, -12),
+    #8: (-4, 15),
+    #9: (30, -5)
+}
+DEFAULT_SHIFT = (0.0, 0.0)
+
+# Which rows to include in the FINAL combined y_out vs y_in plots
+# (and optional combined heatmaps if you enable USE_ONLY_SELECTED_ROWS_FOR_HEATMAPS)
+USE_ONLY_SELECTED_ROWS = True
+ROWS_FOR_COMBINED = {0}   # <-- these are now k values
+
+# Optional: restrict ALL-ROWS HEATMAP overlay to selected rows too
+USE_ONLY_SELECTED_ROWS_FOR_HEATMAPS = True
+ROWS_FOR_HEATMAPS = {0}   # <-- k values
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+def build_row_windows(y0_first, row_h, y_max):
+    wins = []
+    k = 0
+    while True:
+        y_lo = y0_first + k * row_h
+        y_hi = y_lo + row_h
+        if y_lo > y_max:
+            break
+        wins.append((k, y_lo, y_hi))
+        k += 1
+    return wins
+
+def make_color_map_for_trajs(traj_ids, cmap_name="tab20"):
+    cmap = plt.get_cmap(cmap_name)
+    traj_ids = list(traj_ids)
+    return {tid: cmap(i % cmap.N) for i, tid in enumerate(traj_ids)}
+
+def heatmap_2d(x, y, xlim, ylim, bins=(64, 64), smooth_sigma=0.0, log_scale=True):
+    """
+    Return (H, xedges, yedges) where H is a 2D histogram suitable for imshow.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+
+    m = np.isfinite(x) & np.isfinite(y)
+    x = x[m]
+    y = y[m]
+
+    H, xedges, yedges = np.histogram2d(
+        x, y, bins=bins, range=[xlim, ylim]
+    )
+
+    if smooth_sigma and smooth_sigma > 0:
+        H = gaussian_filter(H, sigma=float(smooth_sigma))
+
+    if log_scale:
+        H = np.log1p(H)
+
+    return H, xedges, yedges
+
+def plot_heatmap(H, xedges, yedges, xlabel, ylabel, title, cmap="magma", add_colorbar=True):
+    extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+    plt.figure(figsize=(6, 6))
+    im = plt.imshow(
+        H.T, origin="lower", extent=extent, aspect="auto", cmap=cmap
+    )
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    if add_colorbar:
+        cbar = plt.colorbar(im)
+        cbar.set_label("log(1 + count)" if HM_LOG_SCALE else "count")
+    plt.tight_layout()
+    if FLIP_FINAL_PLOT_AROUND_Y_AXIS:
+        plt.gca().invert_yaxis()
+    plt.show()
+
+
+# =========================================================
+# LOAD DATA
+# =========================================================
+df = pd.read_csv(CSV_PATH)
+
+required = {"cx", "cy", "track_id", "video_name", "angle_deg_360"} #cy_tilt_corrected
+missing = required - set(df.columns)
+if missing:
+    raise ValueError(f"CSV missing required columns: {missing}")
+
+df["trajectory_id"] = df["video_name"].astype(str) + "__" + df["track_id"].astype(str)
+
+x = df["cx"].to_numpy(float)
+y = df["cy"].to_numpy(float) #cy_tilt_corrected
+traj = df["trajectory_id"].to_numpy()
+ang = df["angle_deg_360"].to_numpy(float)
+
+mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(ang)
+x = x[mask]
+y = y[mask]
+traj = traj[mask]
+ang = ang[mask]
+
+if USE_ANGLE_180:
+    ang = np.mod(ang, 180.0)
+    ANG_MAX = 180.0
+    ANG_LABEL = "angle_deg_180"
+else:
+    ang = np.mod(ang, 360.0)
+    ANG_MAX = 360.0
+    ANG_LABEL = "angle_deg_360"
+
+ANGLE_NORM = Normalize(vmin=0.0, vmax=float(ANG_MAX))
+
+print(f"Total points loaded: {len(x)}")
+print(f"Unique trajectories overall: {len(np.unique(traj))}")
+print(f"Angle range forced for colorbars: 0 .. {ANG_MAX} ({ANG_LABEL})")
+
+
+# =========================================================
+# DEFINE ROW WINDOWS
+# =========================================================
+row_windows = build_row_windows(Y0_FIRST, ROW_H, Y_MAX)
+print(f"Defined {len(row_windows)} possible row windows")
+
+
+# =========================================================
+# GLOBAL ACCUMULATORS FOR COMBINED y_out vs y_in
+# =========================================================
+ALL_YIN = []
+ALL_YOUT = []
+ALL_ANGIN = []
+ALL_ANGOUT = []
+ALL_ROWK = []     # store true window index k
+ALL_TRAJ = []
+
+# =========================================================
+# GLOBAL ACCUMULATORS FOR FINAL OVERLAID HEATMAPS (DATA-level overlay)
+# =========================================================
+ALL_XF = []   # folded+shifted x across all rows
+ALL_YF = []   # folded+shifted y across all rows
+ALL_AF = []   # corresponding angle values
+
+
+# =========================================================
+# LOOP PER ROW WINDOW
+# =========================================================
+plot_row_id = 0  # purely for labeling plots if you want consecutive numbering
+
+for k, y_lo, y_hi in row_windows:
+    mask_row = (y >= y_lo) & (y < y_hi)
+    npts = int(mask_row.sum())
+
+    if npts == 0:
+        print(f"Window k={k}: y∈[{y_lo:.1f},{y_hi:.1f}) EMPTY")
+        continue
+
+    xr = x[mask_row]
+    yr = y[mask_row]
+    tr = traj[mask_row]
+    ar = ang[mask_row]
+
+    # trajectory filtering (within this window)
+    df_row = pd.DataFrame({"x": xr, "y": yr, "a": ar, "traj": tr})
+    counts = df_row["traj"].value_counts()
+    valid_trajs = counts[counts >= MIN_POINTS_PER_TRAJ].index
+
+    if len(valid_trajs) < MIN_TRAJ_PER_ROW:
+        print(
+            f"Window k={k}: y∈[{y_lo:.1f},{y_hi:.1f}) skipped: "
+            f"{len(valid_trajs)} valid trajectories (>= {MIN_POINTS_PER_TRAJ} pts)"
+        )
+        continue
+
+    df_row = df_row[df_row["traj"].isin(valid_trajs)]
+
+    xr = df_row["x"].to_numpy()
+    yr = df_row["y"].to_numpy()
+    ar = df_row["a"].to_numpy()
+    tr = df_row["traj"].to_numpy()
+
+    uniq_tr = np.unique(tr)
+    color_map = make_color_map_for_trajs(uniq_tr, cmap_name=CMAP_NAME)
+
+    print(f"Row window k={k}: y∈[{y_lo:.1f},{y_hi:.1f}), points={len(xr)}, trajectories={len(uniq_tr)}")
+
+    # ---------------------------
+    # (A) RAW plot
+    # ---------------------------
+    plt.figure(figsize=(9, 3))
+    for tid in uniq_tr:
+        m = (tr == tid)
+        plt.scatter(xr[m], yr[m], s=POINT_SIZE, alpha=ALPHA, color=color_map[tid])
+    plt.xlabel("cx (raw)")
+    plt.ylabel("cy (tilt-corrected)")
+    plt.title(f"Window k={k} (raw), colored by trajectory")
+    if X_LIM is not None:
+        plt.xlim(*X_LIM)
+    plt.tight_layout()
+    if SAVE_RAW_PNGS:
+        plt.savefig(f"row_k_{k:02d}_raw_colored.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    # ---------------------------
+    # (B) FOLDING
+    # ---------------------------
+    cell_idx = np.floor(xr / CELL_W).astype(int)
+    x_fold = np.mod(xr, CELL_W)
+
+    if APPLY_YSHIFT:
+        y_used = yr + DELTA_Y_PER_CELL * cell_idx
+    else:
+        y_used = yr
+
+    y_fold = np.mod(y_used - y_lo, ROW_H)
+
+    # ---------------------------
+    # (B2) per-row shift inside folded unit cell (use k as key)
+    # ---------------------------
+    sx, sy = ROW_SHIFTS.get(k, DEFAULT_SHIFT)
+    x_fold = np.mod(x_fold + sx, CELL_W)
+    y_fold = np.mod(y_fold + sy, ROW_H)
+
+    # ---------------------------
+    # Accumulate for FINAL ALL-ROWS HEATMAPS (DATA overlay)
+    # ---------------------------
+    use_for_heatmaps = (not USE_ONLY_SELECTED_ROWS_FOR_HEATMAPS) or (k in ROWS_FOR_HEATMAPS)
+    if use_for_heatmaps:
+        ALL_XF.append(x_fold)
+        ALL_YF.append(y_fold)
+        ALL_AF.append(ar)
+
+    # ---------------------------
+    # (C) FINAL FOLDED XY plot
+    # ---------------------------
+    plt.figure(figsize=(6, 6))
+    for tid in uniq_tr:
+        m = (tr == tid)
+        plt.scatter(x_fold[m], y_fold[m], s=POINT_SIZE, alpha=ALPHA, color=color_map[tid])
+    plt.xlabel(f"x_fold (0 .. {CELL_W})")
+    plt.ylabel(f"y_fold (0 .. {ROW_H})")
+    plt.title(f"Window k={k}: folded {CELL_W}×{ROW_H} (colored by trajectory)")
+    plt.xlim(0, CELL_W)
+    plt.ylim(0, ROW_H)
+    if FLIP_FINAL_PLOT_AROUND_Y_AXIS:
+        plt.gca().invert_yaxis()
+    plt.gca().set_aspect("equal", adjustable="box")
+    plt.tight_layout()
+    if SAVE_FOLDED_PNGS:
+        plt.savefig(f"row_k_{k:02d}_folded_{int(CELL_W)}x{int(ROW_H)}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    # ---------------------------
+    # (C2) HEATMAP: x_fold vs y_fold (per row)
+    # ---------------------------
+    if ADD_HEATMAPS:
+        H, xedges, yedges = heatmap_2d(
+            x_fold, y_fold,
+            xlim=(0, CELL_W),
+            ylim=(0, ROW_H),
+            bins=HM_BINS_XY,
+            smooth_sigma=HM_SMOOTH_SIGMA,
+            log_scale=HM_LOG_SCALE
+        )
+        plot_heatmap(
+            H, xedges, yedges,
+            xlabel=f"x_fold (0 .. {CELL_W})",
+            ylabel=f"y_fold (0 .. {ROW_H})",
+            title=f"Window k={k}: HEATMAP of folded unit cell",
+            cmap=HM_CMAP
+        )
+
+    # ---------------------------
+    # (D) ANGLE vs x_fold
+    # ---------------------------
+    plt.figure(figsize=(4, 7))
+    for tid in uniq_tr:
+        m = (tr == tid)
+        plt.scatter(x_fold[m], ar[m], s=POINT_SIZE, alpha=ALPHA, color=color_map[tid])
+    plt.xlabel(f"x_fold (0 .. {CELL_W})")
+    plt.ylabel(f"{ANG_LABEL} (0 .. {int(ANG_MAX)})")
+    plt.title(f"Window k={k}: {ANG_LABEL} vs x_fold (colored by trajectory)")
+    plt.xlim(0, CELL_W)
+    plt.ylim(0, ANG_MAX)
+    plt.tight_layout()
+    if SAVE_ANGLE_PNGS:
+        plt.savefig(f"row_k_{k:02d}_{ANG_LABEL}_vs_xfold.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    # ---------------------------
+    # (D2) HEATMAP: x_fold vs angle (per row)
+    # ---------------------------
+    if ADD_HEATMAPS:
+        H, xedges, yedges = heatmap_2d(
+            x_fold, ar,
+            xlim=(0, CELL_W),
+            ylim=(0, ANG_MAX),
+            bins=HM_BINS_XA,
+            smooth_sigma=HM_SMOOTH_SIGMA,
+            log_scale=HM_LOG_SCALE
+        )
+        plot_heatmap(
+            H, xedges, yedges,
+            xlabel=f"x_fold (0 .. {CELL_W})",
+            ylabel=f"{ANG_LABEL} (0 .. {int(ANG_MAX)})",
+            title=f"Window k={k}: HEATMAP of {ANG_LABEL} vs x_fold",
+            cmap=HM_CMAP
+        )
+
+    # ---------------------------
+    # (E) y_out vs y_in (per row), store for combined plots
+    # ---------------------------
+    yin_list, yout_list, ang_in_list = [], [], []
+
+    eps = 1e-6
+    x_in_target = 0.0
+    x_out_target = CELL_W - eps
+
+    for tid in uniq_tr:
+        m = (tr == tid)
+        if np.sum(m) < 2:
+            continue
+
+        x_t = x_fold[m]
+        y_t = y_fold[m]
+        a_t = ar[m]
+
+        i_in = int(np.argmin(np.abs(x_t - x_in_target)))
+        i_out = int(np.argmin(np.abs(x_t - x_out_target)))
+
+        yin_val = float(y_t[i_in])
+        yout_val = float(y_t[i_out])
+        ang_in_val = float(a_t[i_in])
+        ang_out_val = float(a_t[i_out])
+
+        yin_list.append(yin_val)
+        yout_list.append(yout_val)
+        ang_in_list.append(ang_in_val)
+
+        # accumulate for combined plots (optionally only some rows)
+        use_this_row = (not USE_ONLY_SELECTED_ROWS) or (k in ROWS_FOR_COMBINED)
+        if use_this_row:
+            ALL_YIN.append(yin_val)
+            ALL_YOUT.append(yout_val)
+            ALL_ANGIN.append(ang_in_val)
+            ALL_ANGOUT.append(ang_out_val)
+            ALL_ROWK.append(k)
+            ALL_TRAJ.append(tid)
+
+    if len(yin_list) >= 3:
+        yin = np.array(yin_list)
+        yout = np.array(yout_list)
+        ang_in = np.array(ang_in_list)
+
+        plt.figure(figsize=(6, 6))
+        sc = plt.scatter(
+            yin, yout,
+            c=ang_in,
+            cmap=ANGLE_CMAP,
+            norm=ANGLE_NORM,
+            s=30,
+            edgecolor="k",
+            linewidth=0.3
+        )
+        plt.xlabel("y_in (folded, x ≈ 0)")
+        plt.ylabel(f"y_out (folded, x ≈ {CELL_W})")
+        plt.title(f"Window k={k}: outlet vs inlet y (color = inlet angle)")
+        plt.xlim(0, ROW_H)
+        plt.ylim(0, ROW_H)
+        plt.gca().set_aspect("equal", adjustable="box")
+
+        ticks = np.linspace(0, ANG_MAX, ANGLE_TICKS)
+        cbar = plt.colorbar(sc, ticks=ticks)
+        cbar.set_label(f"{ANG_LABEL} at inlet")
+
+        plt.tight_layout()
+        if SAVE_YOUT_YIN_PNGS:
+            plt.savefig(f"row_k_{k:02d}_yout_vs_yin_anglecolor.png", dpi=300, bbox_inches="tight")
+        plt.show()
+
+    plot_row_id += 1
+
+
+# =========================================================
+# (F) COMBINED y_out vs y_in (selected rows or all)
+# =========================================================
+if len(ALL_YIN) >= 3:
+    ALL_YIN = np.array(ALL_YIN, float)
+    ALL_YOUT = np.array(ALL_YOUT, float)
+    ALL_ANGIN = np.array(ALL_ANGIN, float)
+
+    plt.figure(figsize=(7, 7))
+    sc = plt.scatter(
+        ALL_YOUT, ALL_YIN,
+        c=ALL_ANGIN,
+        cmap=ANGLE_CMAP,
+        norm=ANGLE_NORM,
+        s=18,
+        alpha=0.9
+    )
+    plt.xlabel("y_out (folded)")
+    plt.ylabel("y_in (folded)")
+    plt.title("COMBINED: outlet vs inlet y (color = inlet angle)")
+    plt.xlim(0, ROW_H)
+    plt.ylim(0, ROW_H)
+    plt.gca().set_aspect("equal", adjustable="box")
+
+    ticks = np.linspace(0, ANG_MAX, ANGLE_TICKS)
+    cbar = plt.colorbar(sc, ticks=ticks)
+    cbar.set_label(f"{ANG_LABEL} at inlet")
+
+    plt.tight_layout()
+    if SAVE_YOUT_YIN_ALL_PNG:
+        plt.savefig("COMBINED_yout_vs_yin_anglecolor.png", dpi=300, bbox_inches="tight")
+    plt.show()
+else:
+    print("Not enough (y_in, y_out) points collected to make the combined plot.")
+
+
+# =========================================================
+# (G) COMBINED ARROWS: show inlet angle (black) + outlet angle (red, offset)
+# =========================================================
+if len(ALL_YIN) >= 3:
+    ALL_YIN = np.array(ALL_YIN, float)
+    ALL_YOUT = np.array(ALL_YOUT, float)
+    ALL_ANGIN = np.array(ALL_ANGIN, float)
+    ALL_ANGOUT = np.array(ALL_ANGOUT, float)
+
+    theta_in = np.deg2rad(ALL_ANGIN)
+    theta_out = np.deg2rad(ALL_ANGOUT)
+
+    ARROW_LEN = 4.0
+    Uin = ARROW_LEN * np.cos(theta_in)
+    Vin = ARROW_LEN * np.sin(theta_in)
+    Uout = ARROW_LEN * np.cos(theta_out)
+    Vout = ARROW_LEN * np.sin(theta_out)
+
+    plt.figure(figsize=(10, 10))
+
+    plt.quiver(
+        ALL_YIN, ALL_YOUT,
+        Uin, Vin,
+        angles="xy",
+        scale_units="xy",
+        scale=1,
+        width=0.006,
+        headwidth=5,
+        headlength=6,
+        headaxislength=6,
+        alpha=0.6, color="black"
+    )
+
+    OFF = 0.6
+    plt.quiver(
+        ALL_YIN, ALL_YOUT + OFF,
+        Uout, Vout,
+        angles="xy",
+        scale_units="xy",
+        scale=1,
+        width=0.004,
+        headwidth=5,
+        headlength=6,
+        headaxislength=6,
+        alpha=0.6, color="red"
+    )
+
+    plt.xlabel("Y_{i} (µm)", fontsize=30)
+    plt.ylabel("Y_{i+1} (µm)", fontsize=30)
+    plt.xticks(fontsize=24)
+    plt.yticks(fontsize=24)
+    plt.title("Displaed Bacteria", fontsize=40, fontweight="bold")
+
+    plt.xlim(0, ROW_H)
+    plt.ylim(0, ROW_H)
+    plt.gca().set_aspect("equal", adjustable="box")
+    plt.tight_layout()
+    plt.savefig(
+        r"...\in_out_angle.pdf"
+    )
+    plt.show()
+else:
+    print("Not enough (y_in, y_out) points collected to make the combined arrow plot.")
+
+
+
+# =========================================================
+# (H) FINAL OVERLAID HEATMAPS (ALL ROWS COMBINED) - DATA overlay
+# =========================================================
+
+def plot_heatmap_pub(
+    H, xedges, yedges,
+    xlabel, ylabel, title,
+    cmap="hot",
+    add_colorbar=True,
+    flip_y=True, 
+    save_path=None,      # NEW
+    dpi=300, 
+):
+    extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+    plt.figure(figsize=(10, 10))
+    im = plt.imshow(
+        H.T,
+        origin="lower",
+        extent=extent,
+        aspect="auto",
+        cmap=cmap,
+    )
+
+    plt.xlabel(xlabel, fontsize=30)
+    plt.ylabel(ylabel, fontsize=30)
+    plt.xticks(fontsize=24)
+    plt.yticks(fontsize=24)
+    plt.title(title, fontsize=40, fontweight="bold")
+
+    if add_colorbar:
+        cbar = plt.colorbar(im)
+        cbar.set_label("log(1 + count)" if HM_LOG_SCALE else "count", fontsize=30)
+        cbar.ax.tick_params(labelsize=24)
+
+    if flip_y:
+        plt.gca().invert_yaxis()
+
+    plt.tight_layout()
+    # ✅ SAVE HERE
+    if save_path is not None:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
+    plt.show()
+
+
+# ---- Build combined heatmaps from accumulated folded+shifted data ----
+if ADD_HEATMAPS:
+    if len(ALL_XF) == 0:
+        print("No data collected for combined heatmaps (ALL_XF is empty).")
+    else:
+        ALL_XF_cat = np.concatenate(ALL_XF).astype(float)
+        ALL_YF_cat = np.concatenate(ALL_YF).astype(float)
+        ALL_AF_cat = np.concatenate(ALL_AF).astype(float)
+
+        # ---- (H1) Combined: x_fold vs y_fold ----
+        Hxy, xedges_xy, yedges_xy = heatmap_2d(
+            ALL_XF_cat, ALL_YF_cat,
+            xlim=(0, CELL_W),
+            ylim=(0, ROW_H),
+            bins=HM_BINS_XY,
+            smooth_sigma=HM_SMOOTH_SIGMA,
+            log_scale=HM_LOG_SCALE
+        )
+
+        plot_heatmap_pub(
+            Hxy, xedges_xy, yedges_xy,
+            xlabel="X-Unit cell (µm)",
+            ylabel="Y-Unit cell (µm)",
+            title="Displaced Bacteria",
+            cmap=HM_CMAP,
+            flip_y=True,
+            save_path=r"...\heatmap_position_all_rows.pdf"
+        )
+
+        # ---- (H2) Combined: x_fold vs angle ----
+        Hxa, xedges_xa, aedges_xa = heatmap_2d(
+            ALL_XF_cat, ALL_AF_cat,
+            xlim=(0, CELL_W),
+            ylim=(0, ANG_MAX),
+            bins=HM_BINS_XA,
+            smooth_sigma=HM_SMOOTH_SIGMA,
+            log_scale=HM_LOG_SCALE
+            
+        )
+
+        plot_heatmap_pub(
+            Hxa, xedges_xa, aedges_xa,
+            xlabel="X-Unit cell (µm)",
+            ylabel="Angle (°)",
+            title="Displaced Bacteria",
+            cmap=HM_CMAP,
+            flip_y=False,
+            save_path=r"...\hatmap_angle_all_rows.pdf"
+            
+        )
