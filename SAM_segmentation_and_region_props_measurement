@@ -1,0 +1,265 @@
+"""
+The code include 2 steps:
+1-Batch SAM segmentation: save binary masks (no measurements).
+2-Measure the segmented objects properties using Regionprops
+
+Author: Elham Akbari
+"""
+
+#-------Part I: Image segmentation using SAM--------
+import os
+from glob import glob
+
+import torch
+import cv2
+import numpy as np
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+
+# ---------------- USER SETTINGS ----------------
+IMAGE_FOLDER = r"folder_path"
+CHECKPOINT_PATH = r"...\sam_vit_h_4b8939.pth"
+MODEL_TYPE = "vit_h"           # "vit_b", "vit_l", or "vit_h"
+IMAGE_PATTERN = "*.tif"        # Change if you have .png, .jpg, etc.
+
+MIN_AREA = 1                   # Ignore very small masks (pixels)
+SAVE_INDIVIDUAL_MASKS = True   # Save each object as its own binary mask image
+SAVE_COMBINED_MASK = True      # Save one combined binary mask per input image
+# ------------------------------------------------
+
+
+def init_sam_model(checkpoint_path, model_type):
+    """Load SAM model on CPU or CUDA."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+    sam.to(device=device)
+    mask_generator = SamAutomaticMaskGenerator(sam)
+    return mask_generator
+
+
+def save_binary_masks_from_image(image_path, mask_generator, out_individual_dir, out_combined_dir):
+    """Run SAM segmentation and save binary mask images only."""
+    image_name = os.path.basename(image_path)
+    base_name, _ = os.path.splitext(image_name)
+
+    # --- Read image and convert to RGB ---
+    # --- Read image (keep bit-depth) ---
+    image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        print(f"Could not read {image_path}, skipping.")
+        return
+    
+    # --- Convert 16-bit → 8-bit if needed ---
+    if image.dtype == np.uint16:
+        image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    
+    # --- Ensure RGB ---
+    if image.ndim == 2:  # grayscale
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    else:
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # --- Generate masks with SAM ---
+    masks = mask_generator.generate(image_rgb)
+    print(f"{image_name}: {len(masks)} masks detected")
+
+    h, w = image_rgb.shape[:2]
+    combined = np.zeros((h, w), dtype=np.uint8)
+    kept = 0
+
+    # --- Loop over masks and save binaries ---
+    for idx, m in enumerate(masks):
+        seg = m["segmentation"].astype(np.uint8)  # 0/1 mask
+
+        if int(seg.sum()) < MIN_AREA:
+            continue
+
+        kept += 1
+
+        # Convert to 0/255 binary
+        bin_mask = (seg * 255).astype(np.uint8)
+
+        # Accumulate combined mask (union)
+        combined = cv2.bitwise_or(combined, bin_mask)
+
+        # Save individual object mask
+        if SAVE_INDIVIDUAL_MASKS:
+            out_path = os.path.join(out_individual_dir, f"{base_name}_mask_{idx:03d}.png")
+            cv2.imwrite(out_path, bin_mask)
+
+    # Save combined mask for the whole image
+    if SAVE_COMBINED_MASK and kept > 0:
+        out_path = os.path.join(out_combined_dir, f"{base_name}_mask_combined.png")
+        cv2.imwrite(out_path, combined)
+
+
+def main():
+    # 1) init SAM
+    mask_generator = init_sam_model(CHECKPOINT_PATH, MODEL_TYPE)
+
+    # 2) output folders
+    individual_dir = os.path.join(IMAGE_FOLDER, "SAM_binary_masks_individual")
+    combined_dir   = os.path.join(IMAGE_FOLDER, "SAM_binary_masks_combined")
+    os.makedirs(individual_dir, exist_ok=True)
+    os.makedirs(combined_dir, exist_ok=True)
+
+    # 3) find images
+    image_paths = sorted(glob(os.path.join(IMAGE_FOLDER, IMAGE_PATTERN)))
+    print(f"\nFound {len(image_paths)} images in folder.\n")
+
+    # 4) process each image
+    for img_path in image_paths:
+        save_binary_masks_from_image(
+            img_path,
+            mask_generator,
+            out_individual_dir=individual_dir,
+            out_combined_dir=combined_dir,
+        )
+
+    print("\nDone. Binary masks saved to:")
+    print(f"  Individual masks: {individual_dir}")
+    print(f"  Combined masks:   {combined_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+#-------Part II: Measure the objects properties-----------
+
+"""
+Created on Thu Feb 12 23:30:38 2026
+
+Author: Elham Akbari
+"""
+"""
+Batch Otsu thresholding on PNG images + regionprops measurements.
+
+Measures (per detected object):
+- major_axis_length (px)
+- minor_axis_length (px)
+- area (px^2)
+- circularity_custom = 4*area / (major_axis_length^2 * 3.14)
+
+Saves one CSV in the same folder containing measured values, with an extra column "image_name".
+
+Author: Elham
+"""
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+from skimage import io, filters, measure, morphology, color
+
+# =========================================================
+# USER SETTINGS
+# =========================================================
+INPUT_DIR = Path(r"...\SAM_binary_masks_individual")  # Path to individual binary images
+OUTPUT_CSV = INPUT_DIR / "measured_value.csv"
+
+# Optional cleanup
+MIN_AREA_PX = 5          # remove tiny specks
+KEEP_LARGEST_ONLY = False # True if you expect only one object per image
+
+# =========================================================
+# HELPERS
+# =========================================================
+def read_grayscale(p: Path) -> np.ndarray:
+    img = io.imread(str(p))
+    if img.ndim == 3:
+        img = color.rgb2gray(img)  # -> float in [0,1]
+    else:
+        # if uint8/uint16, normalize to [0,1] for Otsu stability
+        img = img.astype(np.float32)
+        if img.max() > 1.0:
+            img /= img.max()
+    return img
+
+def otsu_mask(img01: np.ndarray) -> np.ndarray:
+    thr = filters.threshold_otsu(img01)
+    mask = img01 > thr  # works for white object on dark background (like your example)
+
+    # If the mask accidentally selects the background (happens if image is inverted),
+    # flip it so "True" is the smaller fraction.
+    if mask.mean() > 0.5:
+        mask = ~mask
+
+    # Clean up
+    mask = morphology.remove_small_objects(mask, min_size=MIN_AREA_PX)
+    mask = morphology.remove_small_holes(mask, area_threshold=MIN_AREA_PX)
+
+    return mask
+
+def keep_largest_component(mask: np.ndarray) -> np.ndarray:
+    lab = measure.label(mask)
+    if lab.max() == 0:
+        return mask
+    props = measure.regionprops(lab)
+    largest = max(props, key=lambda r: r.area).label
+    return lab == largest
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    if not INPUT_DIR.exists():
+        raise FileNotFoundError(f"Folder not found:\n{INPUT_DIR}")
+
+    png_files = sorted(INPUT_DIR.glob("*.png"))
+    if not png_files:
+        raise FileNotFoundError(f"No .png files found in:\n{INPUT_DIR}")
+
+    rows = []
+
+    for p in png_files:
+        img = read_grayscale(p)
+        mask = otsu_mask(img)
+
+        if KEEP_LARGEST_ONLY:
+            mask = keep_largest_component(mask)
+
+        lab = measure.label(mask)
+        props = measure.regionprops(lab)
+
+        if len(props) == 0:
+            # still write a row to show the image was processed
+            rows.append({
+                "image_name": p.name,
+                "object_id": np.nan,
+                "major_axis_length": np.nan,
+                "minor_axis_length": np.nan,
+                "area": 0,
+                "circularity_custom": np.nan,
+            })
+            continue
+
+        for r in props:
+            major = float(r.major_axis_length) if r.major_axis_length else np.nan
+            minor = float(r.minor_axis_length) if r.minor_axis_length else np.nan
+            area = float(r.area)
+
+            # Your custom circularity definition:
+            # 4*area/(major_axis_length*major_axis_length*3.14)
+            if np.isfinite(major) and major > 0:
+                circ_custom = 4.0 * area / (major * major * 3.14)
+            else:
+                circ_custom = np.nan
+
+            rows.append({
+                "image_name": p.name,
+                "object_id": int(r.label),
+                "major_axis_length": major,
+                "minor_axis_length": minor,
+                "area": area,
+                "circularity_custom": circ_custom,
+            })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(OUTPUT_CSV, index=False)
+    print(f"Saved: {OUTPUT_CSV}")
+    print(f"Rows (objects): {len(df)}")
+
+if __name__ == "__main__":
+    main()
