@@ -1,0 +1,700 @@
+
+Routing Probability Estimation — Minimal model with user-defined priors
+
+Author: Elham Akbari, Jason P. Beech
+
+Overview
+--------
+This script estimates routing probabilities for three outlet classes
+("small", "medium", "large") from experimentally measured size distributions.
+
+The workflow is:
+
+1. Read inlet and outlet CSV files
+2. Filter data by major axis length and circularity
+3. Build a common binning using the inlet distribution
+4. Estimate the inlet probability density p(d)
+5. Estimate outlet posterior probabilities P(k | d) using a minimal Bayesian model
+   with user-defined class priors P(k)
+6. Compute device metrics such as cutoff diameter, purity, and yield
+7. Plot routing probability curves
+
+Mathematical idea
+-----------------
+For each outlet class k, the script estimates:
+
+    P(k | d) ∝ P(d | k) * P(k)
+
+where:
+- P(d | k) is approximated from the histogram shape of outlet k
+- P(k) is a user-defined prior for outlet k
+- d is particle size (here: major axis length)
+
+The final posterior curves are normalized so that for each size bin:
+
+    P(small | d) + P(medium | d) + P(large | d) = 1
+
+Compatibility
+-------------
+Tested for Python 3.8+ style syntax.
+"""
+
+# =========================================================
+# 0) IMPORTS
+# =========================================================
+import os
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# In notebooks, display() gives prettier tables.
+# In a normal .py script, fall back to print().
+try:
+    from IPython.display import display
+except Exception:
+    display = print
+
+# Optional monotonic smoothing for routing curves.
+# If scikit-learn is not installed, the code still works.
+try:
+    from sklearn.isotonic import IsotonicRegression
+    HAS_SK = True
+except Exception:
+    HAS_SK = False
+
+
+# =========================================================
+# 1) USER SETTINGS
+# =========================================================
+
+# -------------------------
+# Input file paths
+# -------------------------
+INLET_PATH = r"...\Inlet.csv" #CSV file that has measured data of inlet sample
+SMALL_PATH = r"...\small.csv"  #CSV file that has measured data of sample from the small outlet
+MEDIUM_PATH = r"...\middle.csv"  #CSV file that has measured data of sample from the medium outlet
+LARGE_PATH = r"...\large.csv"    #CSV file that has measured data of sample from the large outlet
+
+# -------------------------
+# Column names in CSV files
+# -------------------------
+MAJOR_COL = "major_axis_length"
+CIRC_COL = "circularity"
+
+# -------------------------
+# Numerical stability
+# Small constant used to avoid division by zero
+# -------------------------
+EPS = 1e-12  #A tiny number added to avoid division by zero or numerical crashes.
+
+# -------------------------
+# Binning settings
+# The main binning is determined from the inlet distribution
+# using the Freedman–Diaconis rule, then optionally capped.
+# -------------------------
+MAX_BINS = 140   # set to None to disable the cap #number of bins in histogram (not the binning for routing probability measurement)
+
+# -------------------------
+# Inlet density smoothing
+# -------------------------
+SMOOTH_INLET = True
+INLET_SMOOTH_WINDOW = 3   # must be odd and >= 3   #In this example with value of 3, it means smoothing = (value in previous bin + value in current bin + value in next bin) / 3
+
+# -------------------------
+# Posterior curve smoothing
+# -------------------------
+SMOOTH_P_CURVES = True
+P_SMOOTH_WINDOW = 3       # must be odd and >= 3
+ISOTONIC_CURVES = True    # requires scikit-learn #; This assures that the probability plots follow the concept of increase and decrease in probability. 
+
+# -------------------------
+# Cutoff search
+# Ignore very small sizes below this inlet percentile
+# when estimating cutoff diameter d_c
+#It protects the cutoff calculation from low-count noise in the tails of the distribution.
+# -------------------------
+QMIN_FOR_DC = 0.05
+
+# -------------------------
+# User-defined priors P(k)
+# These values do NOT need to sum to 1;
+# the script normalizes them automatically.
+# Example interpretation:
+#   - larger prior means higher expected probability
+#     of a particle ending up in that outlet class.
+# -------------------------
+PRIORS = {
+    "small": 0.22,
+    "medium": 0.42,
+    "large": 0.36
+}
+
+# -------------------------
+# Optional filters
+# -------------------------
+
+# Filter particles by major axis length
+USE_MAJOR_FILTER = True
+MAJOR_RANGE = (0, 30.0)
+
+# Filter particles by circularity
+USE_CIRC_FILTER = True
+CIRC_RANGE = (0.4, 1.00)
+
+print("Minimal routing model with user-defined priors configured.")
+
+
+# =========================================================
+# 2) DATA LOADING FUNCTIONS
+# =========================================================
+def _resolve(path: str) -> str:
+    """
+    Resolve a file path.
+
+    If the original path exists, use it.
+    Otherwise, try to find the file inside /mnt/data using only its basename.
+
+    This is useful when running locally or in an environment
+    where uploaded files are stored in /mnt/data.
+    """
+    return path if os.path.exists(path) else os.path.join("/mnt/data", os.path.basename(path))
+
+
+def _read_vals_major_and_circ(csv_path: str, major_col: str, circ_col: Optional[str]) -> dict:
+    """
+    Read one CSV file and return filtered major-axis and circularity arrays.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to CSV file.
+    major_col : str
+        Column name for major axis length.
+    circ_col : Optional[str]
+        Column name for circularity. If None, circularity is ignored.
+
+    Returns
+    -------
+    dict
+        Dictionary with:
+            {
+              "major": numpy array of filtered major-axis values,
+              "circ": numpy array of filtered circularity values or None
+            }
+
+    Notes
+    -----
+    A scaling factor of 0.9 is applied to the major-axis values here,
+    matching the original analysis logic.
+    """
+    df = pd.read_csv(_resolve(csv_path))
+
+    if major_col not in df.columns:
+        raise ValueError(
+            "Missing '{}' in {}. Columns: {}".format(major_col, csv_path, list(df.columns))
+        )
+
+    # Convert the major-axis column to numeric and apply scale factor
+    major = pd.to_numeric(df[major_col] * 0.9, errors="coerce").astype(float)
+
+    circ = None
+    if circ_col is not None:
+        if circ_col not in df.columns:
+            raise ValueError(
+                "Missing '{}' in {}. Columns: {}".format(circ_col, csv_path, list(df.columns))
+            )
+        circ = pd.to_numeric(df[circ_col], errors="coerce").astype(float)
+
+    # Base validity mask: keep only finite values
+    mask = np.isfinite(major)
+    if circ is not None:
+        mask &= np.isfinite(circ)
+
+    # Apply major-axis filter if enabled
+    if USE_MAJOR_FILTER:
+        lo, hi = MAJOR_RANGE
+        mask &= (major >= lo) & (major <= hi)
+
+    # Apply circularity filter if enabled
+    if circ is not None and USE_CIRC_FILTER:
+        clo, chi = CIRC_RANGE
+        mask &= (circ >= clo) & (circ <= chi)
+
+    major_f = major[mask].to_numpy()
+    circ_f = circ[mask].to_numpy() if circ is not None else None
+
+    return {"major": major_f, "circ": circ_f}
+
+
+# =========================================================
+# 3) LOAD DATA
+# =========================================================
+inlet_data = _read_vals_major_and_circ(INLET_PATH, MAJOR_COL, CIRC_COL)
+small_data = _read_vals_major_and_circ(SMALL_PATH, MAJOR_COL, CIRC_COL)
+medium_data = _read_vals_major_and_circ(MEDIUM_PATH, MAJOR_COL, CIRC_COL)
+large_data = _read_vals_major_and_circ(LARGE_PATH, MAJOR_COL, CIRC_COL)
+
+# Only major-axis data are used downstream in the probability model
+vals = {
+    "inlet": inlet_data["major"],
+    "small": small_data["major"],
+    "medium": medium_data["major"],
+    "large": large_data["major"],
+}
+
+print("Loaded N (after filters):", {k: len(v) for k, v in vals.items()})
+
+
+# =========================================================
+# 4) COMMON BINNING FROM INLET DATA
+# Bin width is determined using the Freedman–Diaconis rule:
+#
+#     bin_width = 2 * IQR * n^(-1/3)
+#
+# where:
+#     IQR = interquartile range of the data (75th percentile − 25th percentile)
+#     n   = number of data points
+#
+# This rule automatically chooses a histogram bin width that balances
+# resolution and statistical noise. Wider bins are used for smaller
+# datasets or noisier distributions, while larger datasets allow
+# narrower bins for better detail.
+#
+# Reference: Freedman & Diaconis (1981) — On the histogram as a density estimator.
+
+# =========================================================
+# The inlet distribution defines the common bin edges used for all histograms.
+# This keeps inlet and outlet histograms directly comparable.
+
+x = vals["inlet"]
+q25, q75 = np.percentile(x, [25, 75])
+iqr = q75 - q25
+n = len(x)
+
+# Freedman–Diaconis bin width:
+#     bw = 2 * IQR * n^(-1/3)
+# Falls back to a Scott-like estimate if needed.
+if iqr > 0 and n > 1:
+    bw = 2 * iqr * (n ** (-1 / 3))
+else:
+    bw = (np.std(x, ddof=1) * 3.49) * (n ** (-1 / 3)) if n > 1 else 1.0
+
+# Final fallback if bin width is still invalid
+if not np.isfinite(bw) or bw <= 0:
+    bw = (np.max(x) - np.min(x)) / max(30, 1)
+
+xmin, xmax = float(np.min(x)), float(np.max(x))
+pad = 0.02 * (xmax - xmin if xmax > xmin else 1.0)
+
+edges = np.arange(xmin - pad, xmax + pad + bw, bw)
+
+# If too few bins were created, use a simple fixed grid
+if len(edges) < 5:
+    edges = np.linspace(xmin - pad, xmax + pad, 40)
+
+# Optional cap on total number of bins
+if MAX_BINS is not None and (len(edges) - 1) > MAX_BINS:
+    edges = np.linspace(edges[0], edges[-1], MAX_BINS + 1)
+
+centers = 0.5 * (edges[:-1] + edges[1:])
+Delta = float(np.mean(np.diff(edges)))   # mean bin width
+B = len(centers)
+
+print("Binning: bins={}, Delta≈{:.4g}".format(B, Delta))
+
+
+# =========================================================
+# 5) HELPER FUNCTIONS
+# =========================================================
+def hist_counts(arr, edges_):
+    """
+    Histogram counts for one array using predefined bin edges.
+    """
+    counts, _ = np.histogram(arr, bins=edges_)
+    return counts.astype(float)
+
+
+def normalize_shape(counts):
+    """
+    Convert histogram counts into a discrete shape distribution.
+
+    Output sums to 1 over bins.
+    """
+    total = float(counts.sum())
+    return (counts / total) if total > 0 else np.zeros_like(counts)
+
+
+def moving_average(y, window):
+    """
+    Simple moving-average smoothing.
+
+    Parameters
+    ----------
+    y : array-like
+        Input signal.
+    window : int
+        Odd window size >= 3.
+
+    Returns
+    -------
+    numpy.ndarray
+        Smoothed signal.
+    """
+    if window is None or window < 3 or window % 2 == 0:
+        return y
+    w = np.ones(window, dtype=float) / float(window)
+    return np.convolve(y, w, mode="same")
+
+
+def inlet_density(c_in, Delta_, smooth=True, window=7):
+    """
+    Convert inlet histogram counts into a density p_in(d).
+
+    The output is normalized so that:
+
+        sum_i p_in[i] * Delta = 1
+    """
+    y = c_in / max(float(c_in.sum()) * Delta_, EPS)
+    if smooth:
+        y = moving_average(y, window)
+        y = np.clip(y, 0, None)
+        y = y / max(float(y.sum()) * Delta_, EPS)
+    return y
+
+
+def isotonic_fit(y, x_, inc=True):
+    """
+    Apply isotonic regression to enforce monotonicity.
+
+    Useful here if you want:
+    - P(small | d) to decrease with size
+    - P(large | d) to increase with size
+
+    If scikit-learn is unavailable, the input is returned unchanged.
+    """
+    if HAS_SK and ISOTONIC_CURVES:
+        ir = IsotonicRegression(increasing=inc, out_of_bounds="clip")
+        return ir.fit_transform(x_, y)
+    return y
+
+
+def renorm_across(Pd):
+    """
+    Renormalize posterior curves across classes so that, for each bin:
+
+        P(small|d) + P(medium|d) + P(large|d) = 1
+    """
+    den = Pd["small"] + Pd["medium"] + Pd["large"] + EPS
+    return {k: np.clip(Pd[k] / den, 0, 1) for k in Pd}
+
+
+# The function below post-processes the routing probability curves for each outlet.
+# It performs three operations:
+#
+# 1) Smoothing – reduces statistical noise in the probability curves using a
+#    moving average filter.
+#
+# 2) Monotonicity enforcement – applies isotonic regression to ensure physically
+#    realistic behavior of the curves (e.g., small-outlet probability decreases
+#    with particle size and large-outlet probability increases).
+#
+# 3) Renormalization – ensures that the probabilities across all outlets sum to
+#    one for each particle size bin.
+#
+# Conceptually, this function acts as a cleanup step that converts the raw
+# probability estimates into smooth, physically consistent routing curves
+def smooth_iso_block(Pd, window):
+    """
+    Smooth posterior curves and optionally enforce monotonicity.
+
+    Smoothing is applied to all classes.
+    Isotonic monotonicity is only enforced for:
+    - small: decreasing with size
+    - large: increasing with size
+
+    medium is left unconstrained except for renormalization.
+    """
+    out = {k: Pd[k].copy() for k in Pd}
+
+    if SMOOTH_P_CURVES:
+        out = {k: moving_average(out[k], window) for k in out}
+        out = {k: np.clip(out[k], 0, 1) for k in out}
+        out = renorm_across(out)
+
+    if ISOTONIC_CURVES and HAS_SK:
+        out["small"] = isotonic_fit(out["small"], centers, inc=False)
+        out["large"] = isotonic_fit(out["large"], centers, inc=True)
+        out = renorm_across(out)
+
+    return out
+
+
+# Finds the first x-position where the curve y(x) crosses a given level,
+# considering only values after xmin_. The crossing location is estimated
+# using linear interpolation between the two surrounding points. Returns
+# NaN if no crossing occurs.
+def first_crossing_after(x_, y_, level, xmin_):
+    """
+    Find the first crossing of y = level after x >= xmin_ using linear interpolation.
+
+    Returns NaN if no crossing is found.
+    """
+    mask = x_ >= float(xmin_)
+    xm = x_[mask]
+    ym = np.asarray(y_)[mask]
+
+    if xm.size < 2:
+        return np.nan
+
+    sgn = np.sign(ym - level)
+    idx = np.where(np.diff(sgn) != 0)[0]
+
+    if idx.size == 0:
+        return np.nan
+
+    i = int(idx[0])
+    x0, x1 = float(xm[i]), float(xm[i + 1])
+    y0, y1 = float(ym[i] - level), float(ym[i + 1] - level)
+
+    if abs(y1 - y0) < 1e-15:
+        return x0
+
+    t = -y0 / (y1 - y0)
+    return float(x0 + t * (x1 - x0))
+
+
+def filtered_cutoff(P_small, P_large, p_in_, qmin=0.0):
+    """
+    Estimate cutoff diameter d_c.
+
+    Strategy:
+    1. Ignore very small sizes below the chosen inlet percentile qmin
+    2. Find the first crossing of:
+           P_small(d) - P_large(d) = 0
+    3. If not found, fall back to:
+           P_large(d) = 0.5
+    4. If still not found, choose the point with minimal difference
+       between P_small and P_large
+
+    Returns
+    -------
+    d_c : float
+        Estimated cutoff diameter
+    d_min : float
+        Lower search bound derived from qmin
+    """
+    if qmin <= 0.0:
+        d_min = float(centers[0])
+    else:
+        cdf = np.cumsum(p_in_) * float(Delta)
+        d_min = float(centers[np.argmax(cdf >= qmin)]) if np.any(cdf >= qmin) else float(centers[0])
+
+    diff = np.asarray(P_small) - np.asarray(P_large)
+
+    dc = first_crossing_after(centers, diff, 0.0, d_min)
+    if not np.isfinite(dc):
+        dc = first_crossing_after(centers, P_large, 0.5, d_min)
+
+    if not np.isfinite(dc):
+        mask = centers >= d_min
+        j = int(np.argmin(np.abs(diff[mask]))) if np.any(mask) else 0
+        dc = float(centers[mask][j]) if np.any(mask) else float(centers[0])
+
+    return dc, d_min
+
+
+def compute_metrics(P, p_in_, qmin=0.0):
+    """
+    Compute device-level performance metrics from posterior curves.
+
+    Metrics include:
+    - outlet fractions R_small, R_medium, R_large
+    - cutoff diameter d_c
+    - transition width (d80 - d20) from P_large
+    - purity and yield for small and large outlets
+    """
+    # Total routed fractions predicted for each outlet
+    R = {k: float(np.sum(P[k] * p_in_ * float(Delta))) for k in P}
+
+    # Cutoff diameter
+    dc, d_min = filtered_cutoff(P["small"], P["large"], p_in_, qmin=qmin)
+
+    # Regions below and above cutoff
+    mask_small_side = centers < dc
+    mask_large_side = centers > dc
+
+    # Purity: among particles routed to an outlet,
+    # what fraction belongs to the intended size side?
+    purity_small = (
+        float(np.sum(P["small"][mask_small_side] * p_in_[mask_small_side] * float(Delta)))
+        / max(R["small"], EPS)
+    )
+    purity_large = (
+        float(np.sum(P["large"][mask_large_side] * p_in_[mask_large_side] * float(Delta)))
+        / max(R["large"], EPS)
+    )
+
+    # Total inlet fractions below/above cutoff
+    F_below = float(np.sum(p_in_[mask_small_side] * float(Delta)))
+    F_above = float(np.sum(p_in_[mask_large_side] * float(Delta)))
+
+    # Yield: among particles truly below/above cutoff,
+    # what fraction is routed correctly?
+    yield_small = (
+        float(np.sum(P["small"][mask_small_side] * p_in_[mask_small_side] * float(Delta))) / max(F_below, EPS)
+        if F_below > 0 else np.nan
+    )
+    yield_large = (
+        float(np.sum(P["large"][mask_large_side] * p_in_[mask_large_side] * float(Delta))) / max(F_above, EPS)
+        if F_above > 0 else np.nan
+    )
+
+    # Transition width using P_large(d)
+    d20 = first_crossing_after(centers, P["large"], 0.2, d_min)
+    d80 = first_crossing_after(centers, P["large"], 0.8, d_min)
+    width = float(d80 - d20) if (np.isfinite(d20) and np.isfinite(d80)) else np.nan
+
+    return {
+        "R_small": R["small"],
+        "R_medium": R["medium"],
+        "R_large": R["large"],
+        "d_c": dc,
+        "d_min": d_min,
+        "d20": d20,
+        "d80": d80,
+        "width": width,
+        "purity_small": purity_small,
+        "purity_large": purity_large,
+        "yield_small": yield_small,
+        "yield_large": yield_large,
+        "F_below": F_below,
+        "F_above": F_above
+    }
+
+
+# =========================================================
+# 6) BUILD HISTOGRAMS AND INLET DENSITY
+# =========================================================
+c_in = hist_counts(vals["inlet"], edges)
+c_sm = hist_counts(vals["small"], edges)
+c_md = hist_counts(vals["medium"], edges)
+c_lg = hist_counts(vals["large"], edges)
+
+# Estimated inlet density p_in(d)
+p_in = inlet_density(c_in, Delta, smooth=SMOOTH_INLET, window=INLET_SMOOTH_WINDOW)
+
+print("Totals (in/out):", int(c_in.sum()), int(c_sm.sum()), int(c_md.sum()), int(c_lg.sum()))
+
+
+# =========================================================
+# 7) MINIMAL MODEL WITH USER-DEFINED PRIORS
+# =========================================================
+# Normalize user-provided priors
+prior_sum = float(sum(PRIORS.values()))
+if prior_sum <= 0:
+    raise ValueError("Sum of PRIORS must be > 0.")
+
+PRIORS = {k: float(v) / prior_sum for k, v in PRIORS.items()}
+
+# Check that all required classes are present
+for key in ["small", "medium", "large"]:
+    if key not in PRIORS:
+        raise ValueError("PRIORS must contain keys: 'small', 'medium', 'large'")
+
+# Convert outlet histograms into normalized shape distributions
+shapes = {
+    "small": normalize_shape(c_sm),
+    "medium": normalize_shape(c_md),
+    "large": normalize_shape(c_lg),
+}
+
+# Minimal Bayesian model:
+#     P(k|d) ∝ P(d|k) * P(k)
+#
+# Here:
+# - shapes[k] approximates P(d|k)
+# - PRIORS[k] is the user-defined P(k)
+# - division by p_in(d) keeps the posterior referenced to inlet abundance
+r = {k: (shapes[k] * PRIORS[k]) / (p_in + EPS) for k in shapes}
+
+# Normalize across classes for each size bin
+den = r["small"] + r["medium"] + r["large"] + EPS
+P_min = {k: np.clip(r[k] / den, 0, 1) for k in r}
+
+# Optional smoothing / monotonic regularization
+P_min = smooth_iso_block(P_min, window=P_SMOOTH_WINDOW)
+
+# Compute performance metrics
+met_min = compute_metrics(P_min, p_in, qmin=QMIN_FOR_DC)
+
+print("\nNormalized priors used:")
+display(pd.Series(PRIORS))
+
+print("\nMinimal model metrics:")
+display(pd.Series(met_min))
+
+
+# =========================================================
+# 8) METRICS TABLE
+# =========================================================
+metrics_df = pd.DataFrame([dict(method="Minimal_with_priors", **met_min)])
+
+print("\nDevice metrics:")
+display(metrics_df)
+
+
+# =========================================================
+# 9) PLOT ROUTING PROBABILITY CURVES
+# =========================================================
+fig, ax = plt.subplots(figsize=(10, 4.5))
+
+size_colors = {
+    "small": "#0072B2",
+    "medium": "#E69F00",
+    "large": "#009E73"
+}
+
+# Plot posterior routing probability curves
+for skey in ["small", "medium", "large"]:
+    ax.plot(
+        centers,
+        P_min[skey],
+        color=size_colors[skey],
+        linewidth=2,
+        label="{} (prior={:.3f})".format(skey, PRIORS[skey])
+    )
+
+# Plot estimated cutoff diameter
+dc = met_min.get("d_c", np.nan)
+if np.isfinite(dc):
+    ax.axvline(
+        dc,
+        color="black",
+        linewidth=1.6,
+        alpha=0.9,
+        label="d_c = {:.2f}".format(dc)
+    )
+
+# Axis labels and styling
+ax.set_xlabel("major_axis_length", fontsize=20, fontweight="bold")
+ax.set_ylabel("P(d)", fontsize=20, fontweight="bold")
+ax.set_title("Minimal model with user-defined priors", fontsize=20, fontweight="bold", loc="left")
+
+ax.tick_params(axis="x", labelsize=18)
+ax.tick_params(axis="y", labelsize=18)
+
+ax.legend(frameon=True, fontsize=12)
+ax.grid(False)
+
+plt.tight_layout()
+
+# Save figure
+plt.savefig(
+    r"...\dc_estimation_minimal_with_priors.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.show()
