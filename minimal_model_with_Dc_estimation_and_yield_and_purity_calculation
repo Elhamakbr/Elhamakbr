@@ -433,7 +433,7 @@ dc = met_min.get("d_c", np.nan)
 if np.isfinite(dc):
     ax.axvline(dc, color="black", linewidth=1.6, alpha=0.9, label="d_c = {:.2f}".format(dc))
 
-ax.set_xlabel("major_axis_length", fontsize=20, fontweight="bold")
+ax.set_xlabel("d(Major axis length)(μm)", fontsize=20, fontweight="bold")
 ax.set_ylabel("P(k|d)", fontsize=20, fontweight="bold")
 ax.set_title("Minimal model with user-defined priors", fontsize=20, fontweight="bold", loc="left")
 
