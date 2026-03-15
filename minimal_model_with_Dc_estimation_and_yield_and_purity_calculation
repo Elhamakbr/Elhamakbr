@@ -82,9 +82,9 @@ QMIN_FOR_DC = 0.05
 # These do not need to sum to 1; code will normalize them
 # -------------------------
 PRIORS = {
-    "small":  0.22,
-    "medium": 0.42,
-    "large":  0.36
+    "small":  0.20,
+    "medium": 0.38,
+    "large":  0.42
 }
 
 print("Minimal routing model with user-defined priors configured.")
@@ -92,14 +92,14 @@ print("Minimal routing model with user-defined priors configured.")
 # -------------------------
 # Major axis range filter
 # -------------------------
-USE_MAJOR_FILTER = True
-MAJOR_RANGE = (0, 30.0)
+USE_MAJOR_FILTER = True #Set to (0,20) for only singlets
+MAJOR_RANGE = (0, 40.0)
 
 # -------------------------
 # Circularity filter
 # -------------------------
-USE_CIRC_FILTER = True
-CIRC_RANGE = (0.9, 1.00)
+USE_CIRC_FILTER = True #Set to (0.9,1) for only singlets
+CIRC_RANGE = (0.4, 1.00)
 
 MAJOR_COL = "major_axis_length"
 CIRC_COL  = "circularity"
