@@ -87,13 +87,13 @@ print("Minimal routing model with user-defined priors configured.")
 # -------------------------
 # Major axis range filter
 # -------------------------
-USE_MAJOR_FILTER = True #chnage to false if you don't want to apply any filters
+USE_MAJOR_FILTER = True #Chang to false to disable size filtering
 MAJOR_RANGE = (2, 25.0)
 
 # -------------------------
 # Circularity filter
 # -------------------------
-USE_CIRC_FILTER = False #Chnage to true if you want to have a fitler
+USE_CIRC_FILTER = False #Change to true to enable circularity filtering
 CIRC_RANGE = (0.9, 1.00)
 
 MAJOR_COL = "major_axis_length"
