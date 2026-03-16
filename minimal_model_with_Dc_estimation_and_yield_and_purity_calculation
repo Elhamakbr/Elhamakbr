@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Mar 10 21:34:25 2026
-
-@author: el4003ak
+Created on Sun Mar 15 20:33:03 2026
+Author: Elham Akbari and Jason P. Beech
 """
-
-# -*- coding: utf-8 -*-
 """
 Routing Probability Estimation — Minimal model only with user-defined priors
 
@@ -23,8 +20,6 @@ Updated metric definitions:
 - purity_large = P(d > Dc | L)   -> computed directly from outlet shape vector
 
 Compatible with older Python versions (e.g. Python 3.8/3.9).
-
-Author: Elham
 """
 
 # =========================================================
@@ -54,7 +49,7 @@ except Exception:
 # -------------------------
 INLET_PATH  = r"...\inlet.csv"
 SMALL_PATH  = r"...\small.csv"
-MEDIUM_PATH = r"...\middle.csv"
+MEDIUM_PATH = r"...\medium.csv"
 LARGE_PATH  = r"...\large.csv"
 
 # -------------------------
@@ -82,9 +77,9 @@ QMIN_FOR_DC = 0.05
 # These do not need to sum to 1; code will normalize them
 # -------------------------
 PRIORS = {
-    "small":  0.20,
-    "medium": 0.38,
-    "large":  0.42
+    "Small":  0.20,
+    "Medium": 0.38,
+    "Large":  0.42
 }
 
 print("Minimal routing model with user-defined priors configured.")
@@ -92,13 +87,13 @@ print("Minimal routing model with user-defined priors configured.")
 # -------------------------
 # Major axis range filter
 # -------------------------
-USE_MAJOR_FILTER = True #Set to (0,20) for only singlets
-MAJOR_RANGE = (0, 40.0)
+USE_MAJOR_FILTER = True #chnage to false if you don't want to apply any filters
+MAJOR_RANGE = (2, 25.0)
 
 # -------------------------
 # Circularity filter
 # -------------------------
-USE_CIRC_FILTER = True #Set to (0.9,1) for only singlets
+USE_CIRC_FILTER = False #Chnage to true if you want to have a fitler
 CIRC_RANGE = (0.4, 1.00)
 
 MAJOR_COL = "major_axis_length"
@@ -159,9 +154,9 @@ large_data  = _read_vals_major_and_circ(LARGE_PATH,  MAJOR_COL, CIRC_COL)
 
 vals = {
     "inlet":  inlet_data["major"],
-    "small":  small_data["major"],
-    "medium": medium_data["major"],
-    "large":  large_data["major"],
+    "Small":  small_data["major"],
+    "Medium": medium_data["major"],
+    "Large":  large_data["major"],
 }
 
 print("Loaded N (after filters):", {k: len(v) for k, v in vals.items()})
@@ -233,7 +228,7 @@ def isotonic_fit(y, x_, inc=True):
     return y
 
 def renorm_across(Pd):
-    den = Pd["small"] + Pd["medium"] + Pd["large"] + EPS
+    den = Pd["Small"] + Pd["Medium"] + Pd["Large"] + EPS
     return {k: np.clip(Pd[k] / den, 0, 1) for k in Pd}
 
 def smooth_iso_block(Pd, window):
@@ -243,8 +238,8 @@ def smooth_iso_block(Pd, window):
         out = {k: np.clip(out[k], 0, 1) for k in out}
         out = renorm_across(out)
     if ISOTONIC_CURVES and HAS_SK:
-        out["small"] = isotonic_fit(out["small"], centers, inc=False)
-        out["large"] = isotonic_fit(out["large"], centers, inc=True)
+        out["Small"] = isotonic_fit(out["Small"], centers, inc=False)
+        out["Large"] = isotonic_fit(out["Large"], centers, inc=True)
         out = renorm_across(out)
     return out
 
@@ -299,7 +294,7 @@ def compute_metrics(P, p_in_, shapes, qmin=0.0):
     R = {k: float(np.sum(P[k] * p_in_ * float(Delta))) for k in P}
 
     # Find cutoff Dc from modeled routing curves
-    dc, d_min = filtered_cutoff(P["small"], P["large"], p_in_, qmin=qmin)
+    dc, d_min = filtered_cutoff(P["Small"], P["Large"], p_in_, qmin=qmin)
 
     # Masks for bins below and above cutoff
     ms = centers < dc
@@ -309,8 +304,8 @@ def compute_metrics(P, p_in_, shapes, qmin=0.0):
     # PURITY: direct sum over outlet size distributions
     # shapes[k] are normalized so sum(shapes[k]) = 1
     # -----------------------------------------------------
-    purity_small = float(np.sum(shapes["small"][ms]))
-    purity_large = float(np.sum(shapes["large"][ml]))
+    purity_small = float(np.sum(shapes["Small"][ms]))
+    purity_large = float(np.sum(shapes["Large"][ml]))
 
     # -----------------------------------------------------
     # YIELD: conditional on inlet size class
@@ -319,23 +314,23 @@ def compute_metrics(P, p_in_, shapes, qmin=0.0):
     F_above = float(np.sum(p_in_[ml] * float(Delta)))
 
     yield_small = (
-        float(np.sum(P["small"][ms] * p_in_[ms] * float(Delta))) / max(F_below, EPS)
+        float(np.sum(P["Small"][ms] * p_in_[ms] * float(Delta))) / max(F_below, EPS)
         if F_below > 0 else np.nan
     )
     yield_large = (
-        float(np.sum(P["large"][ml] * p_in_[ml] * float(Delta))) / max(F_above, EPS)
+        float(np.sum(P["Large"][ml] * p_in_[ml] * float(Delta))) / max(F_above, EPS)
         if F_above > 0 else np.nan
     )
 
     # Transition width from large-routing curve
-    d20 = first_crossing_after(centers, P["large"], 0.2, d_min)
-    d80 = first_crossing_after(centers, P["large"], 0.8, d_min)
+    d20 = first_crossing_after(centers, P["Large"], 0.2, d_min)
+    d80 = first_crossing_after(centers, P["Large"], 0.8, d_min)
     width = float(d80 - d20) if (np.isfinite(d20) and np.isfinite(d80)) else np.nan
 
     return {
-        "R_small": R["small"],
-        "R_medium": R["medium"],
-        "R_large": R["large"],
+        "R_small": R["Small"],
+        "R_medium": R["Medium"],
+        "R_large": R["Large"],
         "d_c": dc,
         "d_min": d_min,
         "d20": d20,
@@ -354,9 +349,9 @@ def compute_metrics(P, p_in_, shapes, qmin=0.0):
 # 4) HISTOGRAMS & INLET DENSITY
 # =========================================================
 c_in = hist_counts(vals["inlet"], edges)
-c_sm = hist_counts(vals["small"], edges)
-c_md = hist_counts(vals["medium"], edges)
-c_lg = hist_counts(vals["large"], edges)
+c_sm = hist_counts(vals["Small"], edges)
+c_md = hist_counts(vals["Medium"], edges)
+c_lg = hist_counts(vals["Large"], edges)
 
 p_in = inlet_density(c_in, Delta, smooth=SMOOTH_INLET, window=INLET_SMOOTH_WINDOW)
 
@@ -372,21 +367,21 @@ if prior_sum <= 0:
 
 PRIORS = {k: float(v) / prior_sum for k, v in PRIORS.items()}
 
-for key in ["small", "medium", "large"]:
+for key in ["Small", "Medium", "Large"]:
     if key not in PRIORS:
-        raise ValueError("PRIORS must contain keys: 'small', 'medium', 'large'")
+        raise ValueError("PRIORS must contain keys: 'Small', 'Medium', 'Large'")
 
 # Outlet size distributions P(d | outlet)
 shapes = {
-    "small":  normalize_shape(c_sm),
-    "medium": normalize_shape(c_md),
-    "large":  normalize_shape(c_lg),
+    "Small":  normalize_shape(c_sm),
+    "Medium": normalize_shape(c_md),
+    "Large":  normalize_shape(c_lg),
 }
 
 # Minimal model:
 # P(k|d) ∝ P(d|k) P(k)
 r = {k: (shapes[k] * PRIORS[k]) / (p_in + EPS) for k in shapes}
-den = r["small"] + r["medium"] + r["large"] + EPS
+den = r["Small"] + r["Medium"] + r["Large"] + EPS
 P_min = {k: np.clip(r[k] / den, 0, 1) for k in r}
 
 P_min = smooth_iso_block(P_min, window=P_SMOOTH_WINDOW)
@@ -415,34 +410,35 @@ display(metrics_df)
 fig, ax = plt.subplots(figsize=(10, 4.5))
 
 size_colors = {
-    "small": "#0072B2",
-    "medium": "#E69F00",
-    "large": "#009E73"
+    "Small": "#0072B2",
+    "Medium": "#E69F00",
+    "Large": "#009E73"
 }
 
-for skey in ["small", "medium", "large"]:
+for skey in ["Small", "Medium", "Large"]:
     ax.plot(
         centers,
         P_min[skey],
         color=size_colors[skey],
-        linewidth=2,
-        label="{} (prior={:.3f})".format(skey, PRIORS[skey])
+        linewidth=4,
+        label="{} (P(k)={:.3f})".format(skey, PRIORS[skey])
     )
 
 dc = met_min.get("d_c", np.nan)
 if np.isfinite(dc):
-    ax.axvline(dc, color="black", linewidth=1.6, alpha=0.9, label="d_c = {:.2f}".format(dc))
+    ax.axvline(dc, color="black", linewidth=3, alpha=0.9, label="Dc = {:.2f}".format(dc))
 
 ax.set_xlabel("d(Major axis length)(μm)", fontsize=20, fontweight="bold")
 ax.set_ylabel("P(k|d)", fontsize=20, fontweight="bold")
-ax.set_title("Minimal model with user-defined priors", fontsize=20, fontweight="bold", loc="left")
+#ax.set_title("Minimal model with user-defined priors", fontsize=20, fontweight="bold", loc="left")
 
 ax.tick_params(axis="x", labelsize=18)
 ax.tick_params(axis="y", labelsize=18)
+#ax.set_xlim(2,25)
 
 ax.legend(frameon=True, fontsize=12)
 ax.grid(False)
 
 plt.tight_layout()
-#plt.savefig(r'...\dc_estimation_minimal_with_priors.pdf')
+#plt.savefig(r'...\dc_estimation_minimal_with_priors_clusters_and_singlets.png') #uncomment if you want to save the final figure in a trajectory
 plt.show()
